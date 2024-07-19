@@ -106,7 +106,7 @@ generate_computer_list() {
                 fi
             fi
         else
-            printf '%-5s %-16s %s\n' "($i)" "$serial_in_list" "$computer_name_in_list"
+			printf '%-5s %-15s %-15s %-5s\n' "($i)" "$serial_in_list" "$computer_name_in_list" "$id_in_list"
         fi
         i=$((i+1))
     done
@@ -389,7 +389,10 @@ echo
 # the following section depends on the chosen MDM command
 case "$mdm_command" in
     eacas)
-        echo "   [main] Sending MDM erase command"
+        echo "   [main] Preparing to send MDM erase command."
+        echo "   [main] Plese choose an Index number to target..."
+        echo ""      
+		printf '%-5s %-15s %-15s %-5s\n' "Index" "Serial" "Computer Name" "JSS ID"
         eacas
         ;;
     redeploy)
