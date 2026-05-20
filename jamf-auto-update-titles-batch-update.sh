@@ -47,7 +47,7 @@ fi
 usage() {
     cat <<'USAGE'
 Usage:
-  ./get-jamf-auto-update-titles.sh [options]
+  ./jamf-auto-update-titles-batch-update.sh [options]
 
 Finds all Jamf Auto Update titles deployed in a Jamf Pro instance by examining
 policies whose names contain "Auto-Update" or "Jamf Auto Update", extracting
@@ -61,7 +61,7 @@ Options:
   -x  | --nointeraction              Skip interactive instance selection
   --user | --client-id CLIENT_ID     Use specified username or Client ID
   --recipe PATH                      Path to profile update recipe
-                                     (default: Policies-AU-ProfilesOnly.jamf.recipe.yaml)
+                                     (default: msp-toolkit-recipes.jamf.Policies-AU-ProfilesOnly)
   --titles-cache PATH                Path to jamf_auto_update_titles_cache.json
   --output-dir PATH                  Temp directory for downloaded policy files
                                      (default: /tmp/mjt/auto-update-titles)
