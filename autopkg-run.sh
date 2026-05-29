@@ -75,7 +75,10 @@ Usage:
 --dp                               - filter DPs on DP name
 -e | --enabled                     - Force policy to enabled (--key POLICY_ENABLED=True)
 -p | --replace                     - Replace existing pkg in Jamf Pro (for pkg uploads)
+--dry-run                          - Run the processor in dry run mode. 
+                                     No changes will be made to the Jamf Pro server.
 -v[vvv]                            - add verbose output
+
 --[args]                           - Pass through any arguments for AutoPkg
 USAGE
 }
@@ -153,10 +156,16 @@ run_autopkg() {
         autopkg_run_options+=("POLICY_ENABLED=True")
     fi
 
-    # option to replace pkg
+    # option to specify the autopkg report plist file to write to
     if [[ $report_plist ]]; then
         autopkg_run_options+=("--report-plist")
         autopkg_run_options+=("$report_plist")
+    fi
+
+    # option to run in dry run mode
+    if [[ $dry_run -eq 1 ]]; then
+        autopkg_run_options+=("--key")
+        autopkg_run_options+=("dry_run=True")
     fi
 
     # add additional args
@@ -267,6 +276,9 @@ while [[ "$#" -gt 0 ]]; do
             ;;
         -v*)
             verbosity_mode="$1"
+            ;;
+        --dry-run)
+            dry_run=1
             ;;
         -h|--help)
             usage
