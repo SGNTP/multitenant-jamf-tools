@@ -1085,8 +1085,8 @@ run_jamfupload() {
     instance_args+=("$jss_instance")
 
     # add the credentials
-    # instance_args+=("--user")
-    # instance_args+=("$jss_api_user")
+    instance_args+=("--user")
+    instance_args+=("$jss_api_user")
     # instance_args+=("--pass")
     # instance_args+=("$jss_api_password")
 
@@ -1107,7 +1107,9 @@ run_jamfupload() {
     fi
 
     # Run the script and output to stdout
-    # echo "$jamf_upload_path" "${args[@]}" "${instance_args[@]}" # TEMP
+    echo "   [run_jamfupload] Running jamf-upload with the following arguments:"
+    echo "$jamf_upload_path" "${args[@]}" "${instance_args[@]}" # TEMP
+
     "$jamf_upload_path" "${args[@]}" "${instance_args[@]}"
 
     # Send Slack notification

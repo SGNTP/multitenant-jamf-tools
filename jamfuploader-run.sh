@@ -141,6 +141,9 @@ while test $# -gt 0; do
     -v*)
         verbosity_mode="$1"
         ;;
+    --dry-run)
+        dry_run=1
+        ;;
     -h | --help)
         echo "Outputting the help sheet for jamf-upload.sh"
         echo
@@ -172,6 +175,12 @@ if [[ ! $verbosity_mode && ! $quiet_mode ]]; then
     args+=("-v")
 elif [[ ! $quiet_mode ]]; then
     args+=("$verbosity_mode")
+fi
+
+
+# option to run in dry run mode
+if [[ $dry_run -eq 1 ]]; then
+    args+=("--dry-run")
 fi
 
 echo "This script will run grahampugh/jamf-upload/jamf-upload.sh on the instance(s) you choose."
