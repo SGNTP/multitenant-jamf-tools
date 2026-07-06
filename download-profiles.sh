@@ -8,4 +8,11 @@
 # ./jamfuploader-run.sh read --type mobile_device_profile --name "PROFILE NAME" --output /Users/Shared/Jamf/JamfUploader
 # --------------------------------------------------------------------------------
 
+echo "Please use the following command to download profiles:"
+echo ""
+echo "./jamfuploader-run.sh read --type computer_profile --name \"PROFILE NAME\" --output /Users/Shared/Jamf/JamfUploader"
+echo "or"
+echo "./jamfuploader-run.sh read --type mobile_device_profile --name \"PROFILE NAME\" --output /Users/Shared/Jamf/JamfUploader"
+echo ""
+
 exit 0
