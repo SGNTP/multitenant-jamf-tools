@@ -24,6 +24,26 @@ fi
 # FUNCTIONS
 # --------------------------------------------------------------------------------
 
+usage() {
+    echo "Usage: $0 -o <old_policy_name> -n <new_policy_name> [options]"
+    echo ""
+    echo "Required:"
+    echo "  -o | --old-name        Policy name to replace"
+    echo "  -n | --new-name        New policy name"
+    echo ""
+    echo "Options:"
+    echo "  -i | --instance        Specific Jamf instance URL"
+    echo "  -il | --instance-list  Path to a file containing a list of instances"
+    echo "  -a | --all-instances   Run on all configured instances"
+    echo "  --id | --client-id     Client ID / username override"
+    echo "  -x | --nointeraction   Non-interactive mode"
+    echo "  -v                     Verbosity (e.g. -v, -vv, -vvv)"
+    echo "  -h | --help            Show this help"
+    echo ""
+    echo "Example:"
+    echo "  $0 -o 'Old Policy Name' -n 'New Policy Name'"
+}
+
 run_autopkg() {
     # Extract subdomain from jss_instance (e.g., "https://myinstance.jamfcloud.com" -> "myinstance")
     subdomain=$(echo "$jss_instance" | awk -F[/:] '{print $4}' | cut -d'.' -f1)
@@ -56,16 +76,15 @@ run_autopkg() {
     fi
 
     # Run the autopkg command with the extracted values
-    echo OBJECT_ID="$id" 
-    echo NEW_NAME="$REPLACEMENT_NAME"
+    echo "Running: \"$this_script_dir/autopkg-run.sh\" --recipe \"$this_script_dir/recipes/ChangePolicyName.jamf.recipe.yaml\" --instance \"$jss_instance\" --nointeraction --key OBJECT_ID=\"$id\" --key NEW_NAME=\"$REPLACEMENT_NAME\" --replace${verbosity_mode:+ $verbosity_mode}"
     "$this_script_dir/autopkg-run.sh" \
         --recipe "$this_script_dir/recipes/ChangePolicyName.jamf.recipe.yaml" \
         --instance "$jss_instance" \
         --nointeraction \
-        --key OBJECT_ID="$id" \
-        --key NEW_NAME="$REPLACEMENT_NAME" \
+        --key "OBJECT_ID=$id" \
+        --key "NEW_NAME=$REPLACEMENT_NAME" \
         --replace \
-        "$verbosity_mode"
+        ${verbosity_mode:+"$verbosity_mode"}
 }
 
 # --------------------------------------------------------------------------------
