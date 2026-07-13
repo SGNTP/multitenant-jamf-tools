@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # --------------------------------------------------------------------------------
-# Script for replacing a string within policy names across multiple instances
+# Script for replacing a string within computer group names across multiple instances
 #
 # USAGE:
-# ./replace-policy-names.sh -o "Old String" -n "New String"
+# ./replace-computergroup-names.sh -o "Old String" -n "New String"
 # --------------------------------------------------------------------------------
 
 # --------------------------------------------------------------------------------
@@ -28,7 +28,7 @@ usage() {
     echo "Usage: $0 -o <old_string> -n <new_string> [options]"
     echo ""
     echo "Required:"
-    echo "  -o | --old-string      String to find within policy names"
+    echo "  -o | --old-string      String to find within computer group names"
     echo "  -n | --new-string      Replacement string"
     echo ""
     echo "Options:"
@@ -49,22 +49,22 @@ run_autopkg() {
     subdomain=$(echo "$jss_instance" | awk -F[/:] '{print $4}' | cut -d'.' -f1)
     output_dir="/Users/Shared/Jamf/JamfUploader"
 
-    # Download the full policy list
+    # Download the full computer group list
     "$this_script_dir/autopkg-run.sh" \
         --recipe "$this_script_dir/recipes/DownloadObjectList.jamf.recipe.yaml" \
-        --key "OBJECT_TYPE=policy" \
+        --key "OBJECT_TYPE=computer_group" \
         --key "OUTPUT_DIR=$output_dir" \
         --instance "$jss_instance" \
         --nointeraction \
         ${verbosity_mode:+"$verbosity_mode"}
 
-    json_file="$output_dir/$subdomain-policies.json"
+    json_file="$output_dir/$subdomain-computer_groups.json"
     if [[ ! -f "$json_file" ]]; then
-        echo "No policy list found at $json_file for $jss_instance."
+        echo "No computer group list found at $json_file for $jss_instance."
         return
     fi
 
-    # Loop through each policy, rename those whose name contains OLD_STRING
+    # Loop through each group, rename those whose name contains OLD_STRING
     jq -c '.[]' "$json_file" | while read -r obj; do
         id=$(echo "$obj" | jq -r '.id')
         name=$(echo "$obj" | jq -r '.name')
@@ -79,9 +79,9 @@ run_autopkg() {
         fi
 
         echo "Renaming '$name' -> '$new_name' (ID: $id)"
-        echo "Running: \"$this_script_dir/autopkg-run.sh\" --recipe \"$this_script_dir/recipes/ChangePolicyName.jamf.recipe.yaml\" --instance \"$jss_instance\" --nointeraction --key \"OBJECT_ID=$id\" --key \"NEW_NAME=$new_name\" --replace${verbosity_mode:+ $verbosity_mode}"
+        echo "Running: \"$this_script_dir/autopkg-run.sh\" --recipe \"$this_script_dir/recipes/ChangeComputerGroupName.jamf.recipe.yaml\" --instance \"$jss_instance\" --nointeraction --key \"OBJECT_ID=$id\" --key \"NEW_NAME=$new_name\" --replace${verbosity_mode:+ $verbosity_mode}"
         "$this_script_dir/autopkg-run.sh" \
-            --recipe "$this_script_dir/recipes/ChangePolicyName.jamf.recipe.yaml" \
+            --recipe "$this_script_dir/recipes/ChangeComputerGroupName.jamf.recipe.yaml" \
             --instance "$jss_instance" \
             --nointeraction \
             --key "OBJECT_ID=$id" \

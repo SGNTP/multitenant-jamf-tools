@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # --------------------------------------------------------------------------------
-# Script for changing a specific policy name across multiple instances
+# Script for replacing a string within advanced search names across multiple instances
 #
 # USAGE:
-# ./replace-policy-name.sh -o "Old Policy Name" -n "New Policy Name"
+# ./replace-advancedsearch-names.sh -o "Old String" -n "New String"
 # --------------------------------------------------------------------------------
 
 # --------------------------------------------------------------------------------
@@ -25,11 +25,11 @@ fi
 # --------------------------------------------------------------------------------
 
 usage() {
-    echo "Usage: $0 -o <old_policy_name> -n <new_policy_name> [options]"
+    echo "Usage: $0 -o <old_string> -n <new_string> [options]"
     echo ""
     echo "Required:"
-    echo "  -o | --old-name        Policy name to replace"
-    echo "  -n | --new-name        New policy name"
+    echo "  -o | --old-string      String to find within advanced search names"
+    echo "  -n | --new-string      Replacement string"
     echo ""
     echo "Options:"
     echo "  -i | --instance        Specific Jamf instance URL"
@@ -41,50 +41,66 @@ usage() {
     echo "  -h | --help            Show this help"
     echo ""
     echo "Example:"
-    echo "  $0 -o 'Old Policy Name' -n 'New Policy Name'"
+    echo "  $0 -o 'Old String' -n 'New String'"
 }
 
 run_autopkg() {
     # Extract subdomain from jss_instance (e.g., "https://myinstance.jamfcloud.com" -> "myinstance")
     subdomain=$(echo "$jss_instance" | awk -F[/:] '{print $4}' | cut -d'.' -f1)
     output_dir="/Users/Shared/Jamf/JamfUploader"
-    mkdir -p "$output_dir"
-    output_file="$output_dir/$subdomain-policies-$POLICY_NAME_TO_REPLACE.xml"
-    # delete any existing output file
-    if [[ -f "$output_file" ]]; then
-        rm "$output_file"
-    fi
 
-    # first, check if a policy of this name exists
-    "$this_script_dir/jamfuploader-run.sh" read \
-        --type policy \
-        --name "$POLICY_NAME_TO_REPLACE" \
-        --instance "$jss_instance" \
-        --nointeraction \
-        --output "$output_dir"
+    # Repeat for advanced computer and mobile device searches
+    for object_type in "advanced_computer_search" "advanced_mobile_device_search"; do
 
-    if [[ ! -f "$output_file" ]]; then
-        echo "No policy found with the name '$POLICY_NAME_TO_REPLACE' on $jss_instance."
-        return
-    fi
-    
-    # get value of id key from the output xml file
-    id=$(xmllint --xpath 'string(//general/id)' "$output_file" 2>/dev/null) 
-    if [[ -z "$id" ]]; then
-        echo "No ID found for the policy '$POLICY_NAME_TO_REPLACE' on $jss_instance."
-        return
-    fi
+        if [[ "$object_type" == "advanced_computer_search" ]]; then
+            json_key="advanced_computer_searches"
+            change_recipe="$this_script_dir/recipes/ChangeAdvancedComputerSearchName.jamf.recipe.yaml"
+        else
+            json_key="advanced_mobile_device_searches"
+            change_recipe="$this_script_dir/recipes/ChangeAdvancedMobileDeviceSearchName.jamf.recipe.yaml"
+        fi
 
-    # Run the autopkg command with the extracted values
-    echo "Running: \"$this_script_dir/autopkg-run.sh\" --recipe \"$this_script_dir/recipes/ChangePolicyName.jamf.recipe.yaml\" --instance \"$jss_instance\" --nointeraction --key OBJECT_ID=\"$id\" --key NEW_NAME=\"$REPLACEMENT_NAME\" --replace${verbosity_mode:+ $verbosity_mode}"
-    "$this_script_dir/autopkg-run.sh" \
-        --recipe "$this_script_dir/recipes/ChangePolicyName.jamf.recipe.yaml" \
-        --instance "$jss_instance" \
-        --nointeraction \
-        --key "OBJECT_ID=$id" \
-        --key "NEW_NAME=$REPLACEMENT_NAME" \
-        --replace \
-        ${verbosity_mode:+"$verbosity_mode"}
+        # Download the full list for this search type
+        "$this_script_dir/autopkg-run.sh" \
+            --recipe "$this_script_dir/recipes/DownloadObjectList.jamf.recipe.yaml" \
+            --key "OBJECT_TYPE=$object_type" \
+            --key "OUTPUT_DIR=$output_dir" \
+            --instance "$jss_instance" \
+            --nointeraction \
+            ${verbosity_mode:+"$verbosity_mode"}
+
+        json_file="$output_dir/$subdomain-$json_key.json"
+        if [[ ! -f "$json_file" ]]; then
+            echo "No $object_type list found at $json_file for $jss_instance."
+            continue
+        fi
+
+        # Loop through each search, rename those whose name contains OLD_STRING
+        jq -c '.[]' "$json_file" | while read -r obj; do
+            id=$(echo "$obj" | jq -r '.id')
+            name=$(echo "$obj" | jq -r '.name')
+
+            if [[ "$name" != *"$OLD_STRING"* ]]; then
+                continue
+            fi
+
+            new_name="${name//$OLD_STRING/$NEW_STRING}"
+            if [[ "$name" == "$new_name" ]]; then
+                continue
+            fi
+
+            echo "Renaming '$name' -> '$new_name' (ID: $id)"
+            echo "Running: \"$this_script_dir/autopkg-run.sh\" --recipe \"$change_recipe\" --instance \"$jss_instance\" --nointeraction --key \"OBJECT_ID=$id\" --key \"NEW_NAME=$new_name\" --replace${verbosity_mode:+ $verbosity_mode}"
+            "$this_script_dir/autopkg-run.sh" \
+                --recipe "$change_recipe" \
+                --instance "$jss_instance" \
+                --nointeraction \
+                --key "OBJECT_ID=$id" \
+                --key "NEW_NAME=$new_name" \
+                --replace \
+                ${verbosity_mode:+"$verbosity_mode"}
+        done
+    done
 }
 
 # --------------------------------------------------------------------------------
@@ -121,23 +137,23 @@ while [[ "$#" -gt 0 ]]; do
             usage
             exit
             ;;
-        -o|--old-name)
+        -o|--old-string)
             shift
-            POLICY_NAME_TO_REPLACE="$1"
+            OLD_STRING="$1"
             ;;
-        -n|--new-name)
+        -n|--new-string)
             shift
-            REPLACEMENT_NAME="$1"
+            NEW_STRING="$1"
             ;;
     esac
     # Shift after checking all the cases to get the next option
     shift
 done
 
-# ensure that parameters 1 and 2 are provided
-if [[ -z "$POLICY_NAME_TO_REPLACE" || -z "$REPLACEMENT_NAME" ]]; then
-    echo "Usage: $0 <policy_name_to_replace> <replacement_name>"
-    echo "Example: $0 'Old Policy Name' 'New Policy Name'"
+# ensure that both strings are provided
+if [[ -z "$OLD_STRING" || -z "$NEW_STRING" ]]; then
+    echo "Usage: $0 -o <old_string> -n <new_string>"
+    echo "Example: $0 -o 'Old String' -n 'New String'"
     exit 1
 fi
 
@@ -166,6 +182,6 @@ for instance in "${instance_choice_array[@]}"; do
     run_autopkg
 done
 
-echo 
+echo
 echo "Finished"
 echo
