@@ -8,7 +8,7 @@
 # ./jamfuploader-run.sh read --type mobile_device_profile --name "PROFILE NAME" --output /Users/Shared/Jamf/JamfUploader
 # --------------------------------------------------------------------------------
 
-echo "Please use the following command to download profiles:"
+echo "This script is no longer required. Please use the following command to download profiles:"
 echo ""
 echo "./jamfuploader-run.sh read --type os_x_configuration_profile --name \"PROFILE NAME\" --output /Users/Shared/Jamf/JamfUploader"
 echo "or"
