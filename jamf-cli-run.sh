@@ -135,10 +135,10 @@ if [[ ${#args[@]} -eq 0 ]]; then
     exit 1
 fi
 
-# if help, -h or --help is passed, or --profile, then we bypass the instance selection and run the jamf-cli command with the provided arguments
+# if help, -h or --help is passed, or --profile, or multi, then we bypass the instance selection and run the jamf-cli command with the provided arguments
 raw_output=0
 for arg in "${args[@]}"; do
-    if [[ "$arg" == "help" || "$arg" == "-h" || "$arg" == "--help" || "$arg" == "--profile" ]]; then
+    if [[ "$arg" == "help" || "$arg" == "-h" || "$arg" == "--help" || "$arg" == "--profile" || "$arg" == "multi" ]]; then
         raw_output=1
         break
     fi
