@@ -130,10 +130,23 @@ jc() {
     "$jamf_cli_path" "$@" --url "$jss_url" --token-file "$token_file_for_jamfcli"
 }
 
-# fmt "TYPE" "VERSION" -> "TYPE VERSION" (drops empty version)
+# friendly "Label version" for display / logs (drops empty version)
 fmt_val() {
-    local t="$1" v="$2"
-    if [[ -n "$v" ]]; then echo "$t $v"; else echo "$t"; fi
+    local t="$1" v="$2" l
+    l="$(label_for_type "$t")"
+    if [[ -n "$v" ]]; then echo "$l $v"; else echo "$l"; fi
+}
+
+# human-readable label for an enforcement enum value
+label_for_type() {
+    case "$1" in
+        NO_ENFORCEMENT)                  echo "No enforcement" ;;
+        MINIMUM_OS_LATEST_VERSION)       echo "Latest version" ;;
+        MINIMUM_OS_LATEST_MAJOR_VERSION) echo "Latest major" ;;
+        MINIMUM_OS_LATEST_MINOR_VERSION) echo "Latest minor" ;;
+        MINIMUM_OS_SPECIFIC_VERSION)     echo "Specific version" ;;
+        *)                               echo "$1" ;;
+    esac
 }
 
 # obtain a bearer token for a given instance (sets jss_instance/jss_url/token_file_for_jamfcli)
@@ -279,6 +292,54 @@ resolve_target_version() {
 
 # ---- set mode: apply -----------------------------------------------------------
 
+# collect one summary row (parallel arrays, grouped/printed at the end)
+sum_add() {
+    SUM_INST+=("$jss_instance"); SUM_NAME+=("$1")
+    SUM_BEFORE+=("$2"); SUM_AFTER+=("$3"); SUM_RESULT+=("$4")
+}
+
+# print the set-mode summary as aligned tables, grouped by instance
+print_set_summary() {
+    [[ ${#SUM_NAME[@]} -eq 0 ]] && { echo; echo "   (no prestages processed)"; return; }
+    local nw=8 bw=6 aw=5 i
+    for i in "${!SUM_NAME[@]}"; do
+        [[ ${#SUM_NAME[$i]}   -gt $nw ]] && nw=${#SUM_NAME[$i]}
+        [[ ${#SUM_BEFORE[$i]} -gt $bw ]] && bw=${#SUM_BEFORE[$i]}
+        [[ ${#SUM_AFTER[$i]}  -gt $aw ]] && aw=${#SUM_AFTER[$i]}
+    done
+    [[ $nw -gt 40 ]] && nw=40
+    [[ $bw -gt 30 ]] && bw=30
+    [[ $aw -gt 30 ]] && aw=30
+
+    local verb="Results"
+    [[ $dry_run -eq 1 ]] && verb="Planned changes (dry-run, nothing written)"
+
+    # distinct instances, in first-seen order
+    local insts=() inst seen x
+    for i in "${!SUM_INST[@]}"; do
+        seen=0
+        for x in "${insts[@]}"; do [[ "$x" == "${SUM_INST[$i]}" ]] && { seen=1; break; }; done
+        [[ $seen -eq 0 ]] && insts+=("${SUM_INST[$i]}")
+    done
+
+    for inst in "${insts[@]}"; do
+        echo
+        echo "$verb on $inst:"
+        printf "   %-*s  %-*s  %-*s  %s\n" "$nw" "PreStage" "$bw" "Before" "$aw" "After" "Result"
+        printf "   %-*s  %-*s  %-*s  %s\n" \
+            "$nw" "$(printf '%.0s-' $(seq 1 "$nw"))" \
+            "$bw" "$(printf '%.0s-' $(seq 1 "$bw"))" \
+            "$aw" "$(printf '%.0s-' $(seq 1 "$aw"))" "------"
+        for i in "${!SUM_NAME[@]}"; do
+            [[ "${SUM_INST[$i]}" == "$inst" ]] || continue
+            printf "   %-*.*s  %-*.*s  %-*.*s  %s\n" \
+                "$nw" "$nw" "${SUM_NAME[$i]}" \
+                "$bw" "$bw" "${SUM_BEFORE[$i]}" \
+                "$aw" "$aw" "${SUM_AFTER[$i]}" "${SUM_RESULT[$i]}"
+        done
+    done
+}
+
 # process a single prestage id on the current instance; logs one CSV row
 process_prestage() {
     local pid="$1"
@@ -288,6 +349,7 @@ process_prestage() {
     if [[ -z "$current" ]] || ! echo "$current" | jq -e '.id' >/dev/null 2>&1; then
         echo "   [$jss_instance] id $pid: could not read prestage. Skipping." >&2
         echo "$jss_instance,\"id:$pid\",\"-\",\"-\",READ_ERROR" >> "$output_csv"
+        sum_add "id:$pid" "-" "-" "READ_ERROR"
         (( fail_count++ ))
         return
     fi
@@ -297,8 +359,8 @@ process_prestage() {
     before_val=$(fmt_val "$cur_type" "$(echo "$current" | jq -r '.minimumOsSpecificVersion // ""')")
 
     if [[ $only_enforced -eq 1 && "$cur_type" == "NO_ENFORCEMENT" ]]; then
-        echo "   [$jss_instance] '$label': not enforcing, skipped (--only-enforced)."
         echo "$jss_instance,\"$label\",\"$before_val\",\"$before_val\",SKIPPED" >> "$output_csv"
+        sum_add "$label" "$before_val" "$before_val" "SKIPPED"
         (( skip_count++ ))
         return
     fi
@@ -312,8 +374,8 @@ process_prestage() {
 
     if [[ $dry_run -eq 1 ]]; then
         after_val=$(fmt_val "$target_type" "$want_ver")
-        echo "   [$jss_instance] DRY-RUN '$label': $before_val -> $after_val"
         echo "$jss_instance,\"$label\",\"$before_val\",\"$after_val\",DRY-RUN" >> "$output_csv"
+        sum_add "$label" "$before_val" "$after_val" "DRY-RUN"
         (( dryrun_count++ ))
         return
     fi
@@ -331,8 +393,8 @@ process_prestage() {
     else
         status="FAILED"; (( fail_count++ ))
     fi
-    echo "   [$jss_instance] $status '$label': $before_val -> $after_val"
     echo "$jss_instance,\"$label\",\"$before_val\",\"$after_val\",$status" >> "$output_csv"
+    sum_add "$label" "$before_val" "$after_val" "$status"
 }
 
 # process one instance: obtain token, enumerate prestages, apply to each
@@ -557,6 +619,118 @@ interactive_menu() {
     menu_choose_run_mode
 }
 
+# run "$@" in the background while showing an animated progress bar/counter.
+# returns the command's exit code.
+run_with_progress() {
+    local label="$1"; shift
+    local logf pid pct hashes rc
+    logf=$(mktemp /tmp/optpkg.XXXXXX)
+    ( "$@" >"$logf" 2>&1 ) &
+    pid=$!
+    pct=0
+    while kill -0 "$pid" 2>/dev/null; do
+        pct=$(( pct < 95 ? pct + 5 : 95 ))
+        hashes=$(printf '#%.0s' $(seq 1 $(( pct / 5 ))))
+        printf "\r   %s: [%-20s] %3d%%" "$label" "$hashes" "$pct"
+        sleep 0.3
+    done
+    wait "$pid"; rc=$?
+    if [[ $rc -eq 0 ]]; then
+        printf "\r   %s: [%-20s] %3d%%\n" "$label" "####################" 100
+    else
+        printf "\r   %s: failed (continuing; results will be saved as .csv).\n" "$label"
+        tail -3 "$logf" | sed 's/^/      /'
+    fi
+    rm -f "$logf"
+    return $rc
+}
+
+# pip install / upgrade of openpyxl, matching the JamfCLIToolkit convention
+# (lib/jamf-setup.sh: python3 -m pip install --break-system-packages, with a
+# plain fallback for older pip that lacks that flag).
+_openpyxl_install() {
+    python3 -m pip install --break-system-packages openpyxl \
+        || python3 -m pip install openpyxl
+}
+_openpyxl_upgrade() {
+    python3 -m pip install --break-system-packages --upgrade openpyxl \
+        || python3 -m pip install --upgrade openpyxl
+}
+
+# currently installed openpyxl version (empty if not installed)
+_openpyxl_current_version() {
+    python3 -c 'import openpyxl,sys; sys.stdout.write(getattr(openpyxl,"__version__",""))' 2>/dev/null
+}
+
+# if an update is available, echo "<current> <latest>"; otherwise echo nothing
+_openpyxl_update_check() {
+    python3 - <<'PY' 2>/dev/null
+import json, subprocess, sys
+try:
+    out = subprocess.check_output(
+        [sys.executable, "-m", "pip", "list", "--outdated", "--format=json"],
+        stderr=subprocess.DEVNULL)
+    data = json.loads(out.decode() or "[]")
+except Exception:
+    sys.exit(0)
+for p in data:
+    if str(p.get("name", "")).lower() == "openpyxl":
+        print(p.get("version", ""), p.get("latest_version", ""))
+        break
+PY
+}
+
+# optional dependency: openpyxl (only needed for formatted .xlsx output).
+# - not installed  -> offer to install it (with a short why), yes/no, then continue
+# - installed       -> check for an update; if one exists, report from->to and ask
+#                      whether to update (you can decline and continue)
+# skipped entirely in non-interactive (-x) runs.
+# (The toolkit's Setup menu also manages this centrally; this is the standalone path.)
+optional_openpyxl_step() {
+    [[ $no_interaction -eq 1 ]] && return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    python3 -m pip --version >/dev/null 2>&1 || return 0
+
+    local cur ov nv ans newv
+    if python3 -c "import openpyxl" >/dev/null 2>&1; then
+        cur=$(_openpyxl_current_version)
+        echo
+        echo "   Checking openpyxl for updates (currently ${cur:-unknown})..."
+        read -r ov nv < <(_openpyxl_update_check)
+        if [[ -z "$nv" ]]; then
+            echo "   openpyxl is up to date."
+            return 0
+        fi
+        echo "   An update is available: openpyxl $ov -> $nv"
+        read -r -p "   Update now? [y/N]: " ans
+        if [[ "$ans" =~ ^[Yy] ]]; then
+            run_with_progress "Updating openpyxl $ov -> $nv" _openpyxl_upgrade
+            newv=$(_openpyxl_current_version)
+            echo "   Updated openpyxl from $ov to ${newv:-$nv}."
+        else
+            echo "   Skipped; continuing with openpyxl ${cur:-$ov}."
+        fi
+        return 0
+    fi
+
+    # not present -> offer the optional install
+    echo
+    echo "Optional: install openpyxl (Python package)?"
+    echo "It lets this tool save results as a formatted .xlsx spreadsheet with"
+    echo "clickable prestage links; without it, results are saved as plain .csv."
+    echo
+    echo "   [1] Continue without it"
+    echo "   [2] Install openpyxl now"
+    echo
+    local sel
+    read -r -p "   Choose by number [1]: " sel
+    if [[ "$sel" == "2" ]]; then
+        run_with_progress "Installing openpyxl" _openpyxl_install
+        newv=$(_openpyxl_current_version)
+        [[ -n "$newv" ]] && echo "   Installed openpyxl $newv."
+    fi
+}
+
 # --------------------------------------------------------------------------------
 # MAIN
 # --------------------------------------------------------------------------------
@@ -588,6 +762,9 @@ while [[ "$#" -gt 0 ]]; do
 done
 echo
 
+# optional dependency check/offer (interactive runs only)
+optional_openpyxl_step
+
 # if interactive and no mode was specified on the command line, run the menu
 if [[ $no_interaction -ne 1 && $mode_explicit -ne 1 ]]; then
     interactive_menu
@@ -617,16 +794,39 @@ if [[ "$mode" == "report" ]]; then
         jss_instance="$instance"
         echo
         echo "Checking Computer PreStages on $jss_instance..."
-        local_found=0
+
+        # collect this instance's rows first, so the table can be aligned
+        r_names=(); r_labels=(); r_vers=(); r_links=()
         while IFS=$'\x1f' read -r name etype eversion url; do
             [[ -z "$etype" ]] && continue
-            (( enforced_count++ )); (( local_found++ ))
+            (( enforced_count++ ))
             echo "$jss_instance,\"$name\",$etype,$eversion,$url" >> "$output_csv"
-            # show it on screen too (version shown only when present)
-            printf "   - %s: %s%s\n" "$name" "$etype" "${eversion:+ ($eversion)}"
-            printf "       %s\n" "$url"
+            r_names+=("$name")
+            r_labels+=("$(label_for_type "$etype")")
+            r_vers+=("${eversion:--}")
+            r_links+=("$url")
         done < <(report_prestages_for_instance)
-        [[ $local_found -eq 0 ]] && echo "   (no prestages with enforcement)"
+
+        if [[ ${#r_names[@]} -eq 0 ]]; then
+            echo "   (no prestages with macOS version enforcement)"
+            continue
+        fi
+
+        # width of the PreStage column: widest name, min 8, capped at 44
+        nw=8
+        for i2 in "${!r_names[@]}"; do
+            [[ ${#r_names[$i2]} -gt $nw ]] && nw=${#r_names[$i2]}
+        done
+        [[ $nw -gt 44 ]] && nw=44
+
+        echo
+        printf "   %-*s  %-16s  %-8s  %s\n" "$nw" "PreStage" "Enforcement" "Version" "Link"
+        printf "   %-*s  %-16s  %-8s  %s\n" "$nw" \
+            "$(printf '%.0s-' $(seq 1 "$nw"))" "----------------" "--------" "------------------------------"
+        for i2 in "${!r_names[@]}"; do
+            printf "   %-*.*s  %-16s  %-8s  %s\n" "$nw" "$nw" \
+                "${r_names[$i2]}" "${r_labels[$i2]}" "${r_vers[$i2]}" "${r_links[$i2]}"
+        done
     done
 
     final_output="$output_csv"
@@ -695,13 +895,15 @@ scope_desc="ALL prestages"
 [[ $use_file_values -eq 1 ]] && scope_desc="$scope_desc (values read per-row from file)"
 
 echo "Mode: set"
-echo "Intended change: type=$target_type${target_version:+  version=$target_version}"
 echo "Scope: $scope_desc"
 [[ $dry_run -eq 1 ]] && echo "(dry-run: no changes will be written)"
 
 output_csv="/tmp/prestage-minimum-os-update.csv"
 output_xlsx="/tmp/prestage-minimum-os-update.xlsx"
 echo "Instance,PreStage,Before,After,Result" > "$output_csv"
+
+# summary collection (printed as an aligned table once processing is done)
+SUM_INST=(); SUM_NAME=(); SUM_BEFORE=(); SUM_AFTER=(); SUM_RESULT=()
 
 if [[ ${#chosen_instances[@]} -eq 1 ]]; then
     echo "Running on instance: ${chosen_instances[0]}"
@@ -724,6 +926,9 @@ else
         process_instance
     done
 fi
+
+# aligned summary of what happened / will happen, grouped by instance
+print_set_summary
 
 final_output="$output_csv"
 if command -v python3 >/dev/null 2>&1 && python3 -c "import openpyxl" >/dev/null 2>&1; then
