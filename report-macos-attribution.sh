@@ -509,11 +509,17 @@ def score(rec):
     s4_candidates.sort(key=lambda x: x[1], reverse=True)
     s4 = s4_candidates[0][0] if s4_candidates else None
 
+    # S5 - last logged-in user recorded by the Jamf binary at recon time
+    s5_raw = (g.get("lastLoggedInUsernameBinary") or "").strip().lower()
+    s5_ts  = fmt_date(g.get("lastLoggedInUsernameBinaryTimestamp") or "")
+    s5 = s5_raw if (s5_raw and not is_system(s5_raw)) else None
+
     # votes
     votes = Counter()
     for u in s2: votes[u] += 1
     for u in s3: votes[u] += 1
-    if s4:       votes[s4] += 1
+    if s4: votes[s4] += 1
+    if s5: votes[s5] += 1
 
     inferred = None
     if votes:
@@ -532,13 +538,14 @@ def score(rec):
             s2[0] if s2 else None,
             s3[0] if s3 else None,
             s4,
+            s5,
         ] if u == inferred)
         s1_ok = (not s1) or (s1 == inferred)
         if agree_count >= 2 and s1_ok:
             conf = "High"
         elif agree_count >= 2 and not s1_ok:
             conf = "Medium"
-        elif s4 == inferred and not s2 and not s3 and s4_candidates:
+        elif s4 == inferred and not s2 and not s3 and not s5 and s4_candidates:
             conf = "Medium"
         else:
             conf = "Low"
@@ -551,7 +558,8 @@ def score(rec):
     if s1: signals.append("S1(assigned)")
     if s2: signals.append("S2(MDM-capable)")
     if s3: signals.append("S3(FileVault)")
-    if s4: signals.append(f"S4(home-dir)")
+    if s4: signals.append("S4(home-dir)")
+    if s5: signals.append("S5(last-logged-in)")
 
     return {
         "inferred": inferred or "",
@@ -562,6 +570,8 @@ def score(rec):
         "s2_str": ", ".join(s2),
         "s3_str": ", ".join(s3),
         "s4": s4 or "",
+        "s5": s5 or "",
+        "s5_ts": s5_ts,
         "local_accounts": la,
     }
 
@@ -585,7 +595,8 @@ run_info["device_count"] = len(matched)
 CSV_COLS = [
     "id", "name", "serial", "model", "processor", "os_version",
     "enrolled_date", "initial_entry_date", "last_contact", "last_ip",
-    "device_record_user", "attributed_user", "confidence", "conflict", "evidence",
+    "device_record_user", "last_logged_in_user", "last_logged_in_timestamp",
+    "attributed_user", "confidence", "conflict", "evidence",
 ]
 
 with open(csv_path, "w", newline="", encoding="utf-8") as f:
@@ -606,7 +617,8 @@ with open(csv_path, "w", newline="", encoding="utf-8") as f:
             fmt_date(g.get("initialEntryDate") or ""),
             fmt_date(g.get("lastContactTime") or ""),
             g.get("lastReportedIp") or g.get("lastIpAddress") or "",
-            s["s1"], s["inferred"], s["confidence"],
+            s["s1"], s["s5"], s["s5_ts"],
+            s["inferred"], s["confidence"],
             "YES" if s["conflict"] else "",
             s["evidence"],
         ])
@@ -717,8 +729,8 @@ DEV_COLS = [
     "ID", "Name", "Serial", "Model", "Processor",
     "OS Version", "Enrolled", "Initial Entry",
     "Last Contact", "Last Reported IP",
-    "Device Record User", "Attributed User", "Confidence", "Conflict",
-    "Evidence",
+    "Device Record User", "Last Logged-in User", "Last Login Timestamp",
+    "Attributed User", "Confidence", "Conflict", "Evidence",
 ]
 hdr_row(ws2, DEV_COLS)
 CONF_FILL = {"High": WHITE, "Medium": YELLOW, "Low": YELLOW, "None": RED}
@@ -739,7 +751,8 @@ for ri, (rec, s, _) in enumerate(matched, 2):
         fmt_date(g.get("initialEntryDate") or ""),
         fmt_date(g.get("lastContactTime") or ""),
         g.get("lastReportedIp") or g.get("lastIpAddress") or "",
-        s["s1"], s["inferred"], s["confidence"],
+        s["s1"], s["s5"], s["s5_ts"],
+        s["inferred"], s["confidence"],
         "YES" if s["conflict"] else "",
         s["evidence"],
     ]
