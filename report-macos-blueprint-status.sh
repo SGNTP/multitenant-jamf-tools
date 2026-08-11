@@ -4,6 +4,9 @@
 # Reports Jamf Pro blueprint / Declarative Device Management (DDM) status across
 # the Macs in a Jamf Pro computer group, for one or more Jamf Pro instances.
 #
+# Read-only: this script fetches inventory and per-device DDM state and writes a
+# CSV; it does not change anything in Jamf Pro.
+#
 # This is the multitenant-jamf-tools port of the JamfCLIToolkit
 # macos-blueprint-status.command. It sources _common-framework.sh for
 # instance-list selection and Keychain-backed authentication, and bridges to
@@ -110,14 +113,14 @@ Other:
 
 Examples:
 # Guided, interactive walk-through on one instance
-./configure-macos-blueprint-status.sh -i https://tenant.jamfcloud.com
+./report-macos-blueprint-status.sh -i https://tenant.jamfcloud.com
 
 # Per-declaration report on a specific group, unattended, single instance
-./configure-macos-blueprint-status.sh -i https://tenant.jamfcloud.com \
+./report-macos-blueprint-status.sh -i https://tenant.jamfcloud.com \
     --group "All Managed" --yes
 
 # Per-device pivot for one blueprint across a whole list, no CSV
-./configure-macos-blueprint-status.sh -il my-mac-list --all \
+./report-macos-blueprint-status.sh -il my-mac-list --all \
     --group "All Managed" --blueprint-id abcdef01-2345-... --dry-run --yes
 USAGE
 }
@@ -618,6 +621,111 @@ PYEOF
 # INSTANCE PROCESSING
 # --------------------------------------------------------------------------------
 
+# Interactively pick a computer group on the current instance. Sets $group_name.
+# Called only in interactive mode when --group wasn't supplied on the CLI.
+pick_group_from_instance() {
+    local groups_json="${inst_workdir}/groups.json"
+    echo "  [pick_group_from_instance] listing computer groups on ${jss_instance}..."
+    if ! jc pro classic-computer-groups list \
+        --output json > "${groups_json}" 2>"${inst_workdir}/groups-stderr.log"; then
+        :
+    fi
+    if [[ ! -s "${groups_json}" ]]; then
+        echo "  [pick_group_from_instance] ERROR: could not list computer groups."
+        [[ -s "${inst_workdir}/groups-stderr.log" ]] && sed 's/^/    /' "${inst_workdir}/groups-stderr.log"
+        return 1
+    fi
+
+    # Emit "id<TAB>type<TAB>name" lines, name-sorted, TSV-safe.
+    local menu_file="${inst_workdir}/group-menu.tsv"
+    python3 -c "
+import json, sys
+raw = json.load(open(sys.argv[1]))
+items = raw.get('computer_groups') if isinstance(raw, dict) else raw
+if not isinstance(items, list):
+    items = raw.get('results') if isinstance(raw, dict) else []
+    if not isinstance(items, list):
+        items = []
+def clean(s):
+    return str(s).replace('\t', ' ').replace('\n', ' ').replace('\r', ' ')
+rows = []
+for g in items:
+    if not isinstance(g, dict):
+        continue
+    gid = g.get('id')
+    name = g.get('name') or ''
+    is_smart = g.get('is_smart')
+    gtype = 'smart' if is_smart is True else ('static' if is_smart is False else '?')
+    if gid is None or not name:
+        continue
+    rows.append((clean(str(gid)), gtype, clean(name)))
+rows.sort(key=lambda r: r[2].lower())
+for r in rows:
+    print('\t'.join(r))
+" "${groups_json}" > "${menu_file}" 2>/dev/null
+
+    local total; total=$(grep -c . "${menu_file}" 2>/dev/null || true); total=${total:-0}
+    if [[ "${total}" -eq 0 ]]; then
+        echo "  [pick_group_from_instance] ERROR: no computer groups found on ${jss_instance}."
+        return 1
+    fi
+
+    local -a ids=() types=() names=()
+    local gid gtype name
+    while IFS=$'\t' read -r gid gtype name; do
+        [[ -z "${name}" ]] && continue
+        ids+=("${gid}")
+        types+=("${gtype}")
+        names+=("${name}")
+    done < "${menu_file}"
+
+    echo
+    echo "  Select a computer group (${total} on ${jss_instance}):"
+    echo "  Type part of a name to filter, or press Enter to list all."
+    echo
+
+    local filter
+    read -r -p "  Filter (optional): " filter
+    echo
+
+    local -a fids=() ftypes=() fnames=()
+    local i lower_filter
+    lower_filter=$(printf '%s' "${filter}" | tr '[:upper:]' '[:lower:]')
+    for i in "${!names[@]}"; do
+        local lower_name
+        lower_name=$(printf '%s' "${names[$i]}" | tr '[:upper:]' '[:lower:]')
+        if [[ -z "${lower_filter}" ]] || [[ "${lower_name}" == *"${lower_filter}"* ]]; then
+            fids+=("${ids[$i]}")
+            ftypes+=("${types[$i]}")
+            fnames+=("${names[$i]}")
+        fi
+    done
+
+    local n="${#fnames[@]}"
+    if (( n == 0 )); then
+        echo "  No group name matches \"${filter}\"."
+        return 1
+    fi
+
+    for i in "${!fnames[@]}"; do
+        printf "     [%d] %-6s %s\n" "$((i + 1))" "${ftypes[$i]}" "${fnames[$i]}"
+    done
+    echo
+
+    local choice
+    while true; do
+        read -r -p "     Choose by number: " choice
+        choice="$(printf '%s' "${choice}" | tr -d '[:space:]')"
+        if [[ "${choice}" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= n )); then
+            group_name="${fnames[$((choice - 1))]}"
+            echo "     Selected: ${group_name}"
+            echo
+            return 0
+        fi
+        echo "     Not a valid option."
+    done
+}
+
 fetch_group_members() {
     local group_json="${inst_workdir}/group.json"
     echo "  [fetch_group_members] resolving group \"${group_name}\"..."
@@ -916,6 +1024,11 @@ process_instance() {
     if [[ ${interactive_pick} -eq 1 ]]; then
         blueprint_id=""
         include_all=0
+        # If --group wasn't supplied on the CLI, ask the user to pick one on
+        # this instance (groups differ per tenant, so pick per-instance).
+        if [[ -z "${group_name}" ]]; then
+            pick_group_from_instance || { returncode=1; return; }
+        fi
     fi
 
     fetch_group_members || { returncode=1; return; }
@@ -980,7 +1093,7 @@ if [[ $dry_run -eq 0 ]]; then
 fi
 
 # temp working directory for per-run scratch files
-workdir=$(mktemp -d /tmp/configure-macos-blueprint-status-XXXXXX)
+workdir=$(mktemp -d /tmp/report-macos-blueprint-status-XXXXXX)
 trap 'rm -f "${token_file_for_jamfcli:-}"; rm -rf "${workdir}"' EXIT
 
 write_python_helpers
@@ -998,16 +1111,11 @@ fi
 # select the instances that will be reported on
 choose_destination_instances
 
-# require --group unless we can ask
-if [[ -z "${group_name}" ]]; then
-    if [[ $assume_yes -eq 1 || $no_interaction -eq 1 || ! -t 0 ]]; then
-        echo "ERROR: --group NAME is required in non-interactive mode."
-        exit 1
-    fi
-    while [[ -z "${group_name}" ]]; do
-        read -r -p "Jamf Pro computer group name (exact, case-sensitive): " group_name
-        [[ -z "${group_name}" ]] && echo "  Group name is required."
-    done
+# require --group in non-interactive mode; otherwise pick_group_from_instance
+# will fire per-instance after the token is minted (groups are per-tenant).
+if [[ -z "${group_name}" && ${interactive_pick} -eq 0 ]]; then
+    echo "ERROR: --group NAME is required in non-interactive mode."
+    exit 1
 fi
 
 # loop through the chosen instances
