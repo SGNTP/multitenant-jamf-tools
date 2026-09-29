@@ -111,20 +111,6 @@ Other:
 USAGE
 }
 
-# safe filename from a URL: strip scheme, replace non-alphanumeric with hyphens
-instance_slug() {
-    local u="${1#*://}"
-    u="${u%%/*}"; u="${u%%:*}"
-    printf '%s' "${u}" | /usr/bin/tr 'A-Z' 'a-z' | /usr/bin/tr -cs 'a-z0-9' '-' | /usr/bin/sed 's/^-//;s/-$//'
-}
-
-section() {
-    echo
-    echo "=================================================================="
-    echo "  ${1}"
-    echo "=================================================================="
-}
-
 # Interactive prompt with a default. $1=prompt $2=outvar $3=default
 ask() {
     local prompt="$1" outvar="$2" default="$3" ans
@@ -997,7 +983,7 @@ for rec in inv:
         return
     fi
 
-    /usr/bin/python3 "$workdir/score.py" \
+    "$mjt_python" "$workdir/score.py" \
         "$inv_file" \
         "$workdir/history.json" \
         "$xlsx_path" \
@@ -1078,6 +1064,9 @@ while [[ "$#" -gt 0 ]]; do
     shift
 done
 
+# openpyxl is optional (formatted .xlsx report, else the CSV only)
+ensure_dependencies "openpyxl?"
+
 # Working directory
 workdir=$(/usr/bin/mktemp -d /tmp/report-macos-attribution-XXXXXX)
 trap '/bin/rm -rf "${workdir}"' EXIT
@@ -1088,9 +1077,7 @@ echo "macOS Attribution Report"
 [[ $do_history -eq 1 ]] && echo "History: on (use --no-history to skip)" || echo "History: off"
 echo
 
-if [[ ${#chosen_instances[@]} -eq 1 ]]; then
-    chosen_instance="${chosen_instances[0]}"
-fi
+announce_instances
 
 choose_destination_instances
 collect_filters

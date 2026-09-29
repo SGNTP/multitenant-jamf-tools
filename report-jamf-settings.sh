@@ -57,7 +57,7 @@ while [[ "$#" -gt 0 ]]; do
             echo "  -o  | --output-dir DIR           output folder (prompts /tmp or ~/Desktop if omitted)"
             echo ""
             echo "All other flags are forwarded to report-jamf-settings.py."
-            echo "Run: python3 report-jamf-settings.py --help  for the full list."
+            echo "Run: python3 report-jamf-settings.py --help  for the full list (needs Python 3.10+)."
             exit 0
             ;;
         *) forward_args+=("$1") ;;
@@ -68,6 +68,11 @@ done
 # --------------------------------------------------------------------------------
 # MAIN
 # --------------------------------------------------------------------------------
+
+# the Python script needs 3.10+ with openpyxl and msoffcrypto-tool
+ensure_dependencies jamf-cli python3.10 openpyxl msoffcrypto || exit 1
+# the Python script finds jamf-cli on PATH
+export PATH="$(/usr/bin/dirname "$jamf_cli_path"):$PATH"
 
 choose_destination_instances
 
@@ -89,7 +94,7 @@ for jss_instance in "${instance_choice_array[@]}"; do
         continue
     fi
 
-    /usr/bin/python3 "$python_script" \
+    "$mjt_python" "$python_script" \
         --url "$jss_instance" \
         --token-file "$token_file_for_jamfcli" \
         "${output_args[@]}" \

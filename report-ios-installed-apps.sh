@@ -169,7 +169,7 @@ build_app_list() {
         app_names+=("$name")
         app_ids+=("$identifier")
         app_titles+=("$titles")
-    done < <(/usr/bin/jq -r --arg filter "$app_filter" '
+    done < <("$jq_bin" -r --arg filter "$app_filter" '
         ($filter | ascii_downcase | split(" ") | map(select(length > 0))) as $terms
         | (if type == "object" then (.results // []) else . end)
         | [ .[]
@@ -325,12 +325,12 @@ write_csv() {
 
     # jq 1.6+ has strflocaltime for local-time output; fall back to UTC without it
     local date_fn="strflocaltime"
-    if ! echo 'null' | /usr/bin/jq -e '0 | strflocaltime("%Y")' >/dev/null 2>&1; then
+    if ! echo 'null' | "$jq_bin" -e '0 | strflocaltime("%Y")' >/dev/null 2>&1; then
         date_fn="strftime"
         echo "   [report] NOTE: this jq has no strflocaltime, so times stay in UTC."
     fi
 
-    /usr/bin/jq -r --arg app "$app_name" --arg bundle "$app_identifier" --arg mode "$match_mode" '
+    "$jq_bin" -r --arg app "$app_name" --arg bundle "$app_identifier" --arg mode "$match_mode" '
         # Jamf returns ISO 8601 UTC ("2026-08-11T08:16:25.445Z"). Strip the
         # fractional seconds and the zone, then read it as UTC epoch seconds.
         # Returns null for missing or unparseable values so the CSV cell is blank.
@@ -377,7 +377,7 @@ write_csv() {
     ' "$inventory_json" > "$output_csv"
 
     local device_total match_count
-    device_total=$(/usr/bin/jq -r '(if type == "object" then (.results // []) else . end) | length' "$inventory_json")
+    device_total=$("$jq_bin" -r '(if type == "object" then (.results // []) else . end) | length' "$inventory_json")
     match_count=$(( $(/usr/bin/wc -l < "$output_csv") - 1 ))
 
     echo "   [report] Scanned $device_total device(s); $match_count match(es)."
@@ -490,12 +490,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 echo
 
-resolve_jamf_cli || exit 1
-
-if [[ ! -x /usr/bin/jq ]] && ! /usr/bin/which -s jq; then
-    echo "ERROR: jq not found. Install it with: brew install jq"
-    exit 1
-fi
+ensure_dependencies jamf-cli jq || exit 1
 
 # --list-apps never needs an app name
 if [[ $list_apps_only -eq 1 ]]; then

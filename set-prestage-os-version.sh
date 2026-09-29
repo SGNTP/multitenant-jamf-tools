@@ -50,8 +50,6 @@ if [[ ! -d "${this_script_dir}" ]]; then
     exit 1
 fi
 
-resolve_jamf_cli || exit 1
-
 # --------------------------------------------------------------------------------
 # FUNCTIONS
 # --------------------------------------------------------------------------------
@@ -158,7 +156,7 @@ report_prestages_for_instance() {
 
     remove_jamfcli_token
 
-    echo "$prestage_json" | jq -r --arg base "$jss_url" '
+    echo "$prestage_json" | "$jq_bin" -r --arg base "$jss_url" '
         (if type=="object" then .results else . end)[]
         | select(.prestageMinimumOsTargetVersionType != "NO_ENFORCEMENT")
         | "\(.displayName)\(.prestageMinimumOsTargetVersionType)\(.minimumOsSpecificVersion // "")\($base)/computerPrestages.html?id=\(.id)&o=r"
@@ -205,7 +203,7 @@ choose_macos_version() {
     json=$(jc pro managed-software-updates available-updates -o json 2>/dev/null)
     while IFS= read -r v; do
         [[ -n "$v" ]] && options+=("$v")
-    done < <(echo "$json" | jq -r '.availableUpdates.macOS[]?' 2>/dev/null)
+    done < <(echo "$json" | "$jq_bin" -r '.availableUpdates.macOS[]?' 2>/dev/null)
 
     if [[ ${#options[@]} -eq 0 ]]; then
         echo "ERROR: could not retrieve available macOS versions from $jss_url." >&2
@@ -311,7 +309,7 @@ process_prestage() {
     local current before_val updated after after_type after_ver after_val label want_ver status cur_type
 
     current=$(jc pro computer-prestages get "$pid" -o json 2>/dev/null)
-    if [[ -z "$current" ]] || ! echo "$current" | jq -e '.id' >/dev/null 2>&1; then
+    if [[ -z "$current" ]] || ! echo "$current" | "$jq_bin" -e '.id' >/dev/null 2>&1; then
         echo "   [$jss_instance] id $pid: could not read prestage. Skipping." >&2
         echo "$jss_instance,\"id:$pid\",\"-\",\"-\",READ_ERROR" >> "$output_csv"
         sum_add "id:$pid" "-" "-" "READ_ERROR"
@@ -319,9 +317,9 @@ process_prestage() {
         return
     fi
 
-    label=$(echo "$current" | jq -r '.displayName // .id')
-    cur_type=$(echo "$current" | jq -r '.prestageMinimumOsTargetVersionType // ""')
-    before_val=$(fmt_val "$cur_type" "$(echo "$current" | jq -r '.minimumOsSpecificVersion // ""')")
+    label=$(echo "$current" | "$jq_bin" -r '.displayName // .id')
+    cur_type=$(echo "$current" | "$jq_bin" -r '.prestageMinimumOsTargetVersionType // ""')
+    before_val=$(fmt_val "$cur_type" "$(echo "$current" | "$jq_bin" -r '.minimumOsSpecificVersion // ""')")
 
     if [[ $only_enforced -eq 1 && "$cur_type" == "NO_ENFORCEMENT" ]]; then
         echo "$jss_instance,\"$label\",\"$before_val\",\"$before_val\",SKIPPED" >> "$output_csv"
@@ -330,7 +328,7 @@ process_prestage() {
         return
     fi
 
-    updated=$(echo "$current" | jq --arg t "$target_type" --arg v "$target_version" '
+    updated=$(echo "$current" | "$jq_bin" --arg t "$target_type" --arg v "$target_version" '
         .prestageMinimumOsTargetVersionType = $t
         | .minimumOsSpecificVersion = (if $t == "MINIMUM_OS_SPECIFIC_VERSION" then $v else "" end)')
 
@@ -349,8 +347,8 @@ process_prestage() {
     echo "$updated" | jc pro computer-prestages update "$pid" >/dev/null 2>&1 || true
 
     after=$(jc pro computer-prestages get "$pid" -o json 2>/dev/null)
-    after_type=$(echo "$after" | jq -r '.prestageMinimumOsTargetVersionType // ""')
-    after_ver=$(echo "$after" | jq -r '.minimumOsSpecificVersion // ""')
+    after_type=$(echo "$after" | "$jq_bin" -r '.prestageMinimumOsTargetVersionType // ""')
+    after_ver=$(echo "$after" | "$jq_bin" -r '.minimumOsSpecificVersion // ""')
     after_val=$(fmt_val "$after_type" "$after_ver")
 
     if [[ "$after_type" == "$target_type" && "$after_ver" == "$want_ver" ]]; then
@@ -376,7 +374,7 @@ process_instance() {
         ids=("$prestage_id")
     elif [[ -n "$prestage_name" ]]; then
         local found
-        found=$(jc pro computer-prestages get --name "$prestage_name" -o json 2>/dev/null | jq -r '.id // empty')
+        found=$(jc pro computer-prestages get --name "$prestage_name" -o json 2>/dev/null | "$jq_bin" -r '.id // empty')
         if [[ -z "$found" ]]; then
             echo "   [$jss_instance] prestage named '$prestage_name' not found. Skipping." >&2
             echo "$jss_instance,\"$prestage_name\",\"-\",\"-\",NOT_FOUND" >> "$output_csv"
@@ -390,7 +388,7 @@ process_instance() {
         while IFS= read -r one; do
             [[ -n "$one" ]] && ids+=("$one")
         done < <(jc pro computer-prestages list -o json 2>/dev/null \
-                 | jq -r --arg kw "$prestage_keyword" '
+                 | "$jq_bin" -r --arg kw "$prestage_keyword" '
                      (if type=="object" then .results else . end)[]
                      | select(((.displayName // "") | ascii_downcase) | contains($kw | ascii_downcase))
                      | .id')
@@ -405,7 +403,7 @@ process_instance() {
         while IFS= read -r one; do
             [[ -n "$one" ]] && ids+=("$one")
         done < <(jc pro computer-prestages list -o json 2>/dev/null \
-                 | jq -r '(if type=="object" then .results else . end)[] | .id')
+                 | "$jq_bin" -r '(if type=="object" then .results else . end)[] | .id')
     fi
 
     if [[ ${#ids[@]} -eq 0 ]]; then
@@ -500,58 +498,43 @@ run_from_file() {
 
 # top-level: choose report vs set
 menu_choose_mode() {
-    local sel
     echo
     echo "----------------------------------------"
     echo "  PreStage macOS Version Enforcement"
     echo "----------------------------------------"
     echo "Reports and sets macOS version enforcement on Computer PreStage enrollments."
-    echo
-    echo "   [1] Report  - read-only check of current enforcement"
-    echo "   [2] Set     - check and change the enforcement"
-    echo
-    read -r -p "   Choose by number [1]: " sel
-    case "$sel" in
-        ""|1) mode="report" ;;
-        2)    mode="set" ;;
-        *) echo "ERROR: invalid selection. Aborting."; exit 1 ;;
+    choose_from_menu 1 "" \
+        "Report  - read-only check of current enforcement" \
+        "Set     - check and change the enforcement" || exit 1
+    case "$menu_choice" in
+        1) mode="report" ;;
+        2) mode="set" ;;
     esac
 }
 
 # set mode: choose which prestages to target
 menu_choose_scope() {
-    local sel
-    echo
-    echo "Which prestages should be changed?"
-    echo "   [1] All prestages on each chosen instance"
-    echo "   [2] Only prestages that already enforce a version"
-    echo "   [3] Prestages whose name contains a keyword"
-    echo
-    read -r -p "   Choose by number [1]: " sel
-    case "$sel" in
-        ""|1) : ;;
-        2)    only_enforced=1 ;;
-        3)    echo
-              echo "   Matches any prestage whose display name contains the keyword"
-              echo "   (case-insensitive). e.g. 'shar' matches 'All School Devices - Shared'."
-              read -r -p "   Keyword: " prestage_keyword ;;
-        *) echo "ERROR: invalid selection. Aborting."; exit 1 ;;
+    choose_from_menu 1 "Which prestages should be changed?" \
+        "All prestages on each chosen instance" \
+        "Only prestages that already enforce a version" \
+        "Prestages whose name contains a keyword" || exit 1
+    case "$menu_choice" in
+        2)  only_enforced=1 ;;
+        3)  echo
+            echo "   Matches any prestage whose display name contains the keyword"
+            echo "   (case-insensitive). e.g. 'shar' matches 'All School Devices - Shared'."
+            read -r -p "   Keyword: " prestage_keyword ;;
     esac
 }
 
 # set mode: preview vs apply
 menu_choose_run_mode() {
-    local sel
-    echo
-    echo "Run mode:"
-    echo "   [1] Preview only (dry-run, writes nothing)"
-    echo "   [2] Apply changes"
-    echo
-    read -r -p "   Choose by number [1]: " sel
-    case "$sel" in
-        ""|1) dry_run=1 ;;
-        2)    dry_run=0 ;;
-        *) echo "ERROR: invalid selection. Aborting."; exit 1 ;;
+    choose_from_menu 1 "Run mode:" \
+        "Preview only (dry-run, writes nothing)" \
+        "Apply changes" || exit 1
+    case "$menu_choice" in
+        1) dry_run=1 ;;
+        2) dry_run=0 ;;
     esac
 }
 
@@ -562,118 +545,6 @@ interactive_menu() {
     [[ "$mode" == "report" ]] && return 0
     menu_choose_scope
     menu_choose_run_mode
-}
-
-# run "$@" in the background while showing an animated progress bar/counter.
-# returns the command's exit code.
-run_with_progress() {
-    local label="$1"; shift
-    local logf pid pct hashes rc
-    logf=$(/usr/bin/mktemp /tmp/optpkg.XXXXXX)
-    ( "$@" >"$logf" 2>&1 ) &
-    pid=$!
-    pct=0
-    while kill -0 "$pid" 2>/dev/null; do
-        pct=$(( pct < 95 ? pct + 5 : 95 ))
-        hashes=$(printf '#%.0s' $(/usr/bin/seq 1 $(( pct / 5 ))))
-        printf "\r   %s: [%-20s] %3d%%" "$label" "$hashes" "$pct"
-        /bin/sleep 0.3
-    done
-    wait "$pid"; rc=$?
-    if [[ $rc -eq 0 ]]; then
-        printf "\r   %s: [%-20s] %3d%%\n" "$label" "####################" 100
-    else
-        printf "\r   %s: failed (continuing; results will be saved as .csv).\n" "$label"
-        /usr/bin/tail -3 "$logf" | /usr/bin/sed 's/^/      /'
-    fi
-    /bin/rm -f "$logf"
-    return $rc
-}
-
-# pip install / upgrade of openpyxl, matching the JamfCLIToolkit convention
-# (lib/jamf-setup.sh: python3 -m pip install --break-system-packages, with a
-# plain fallback for older pip that lacks that flag).
-_openpyxl_install() {
-    /usr/bin/python3 -m pip install --break-system-packages openpyxl \
-        || /usr/bin/python3 -m pip install openpyxl
-}
-_openpyxl_upgrade() {
-    /usr/bin/python3 -m pip install --break-system-packages --upgrade openpyxl \
-        || /usr/bin/python3 -m pip install --upgrade openpyxl
-}
-
-# currently installed openpyxl version (empty if not installed)
-_openpyxl_current_version() {
-    /usr/bin/python3 -c 'import openpyxl,sys; sys.stdout.write(getattr(openpyxl,"__version__",""))' 2>/dev/null
-}
-
-# if an update is available, echo "<current> <latest>"; otherwise echo nothing
-_openpyxl_update_check() {
-    /usr/bin/python3 - <<'PY' 2>/dev/null
-import json, subprocess, sys
-try:
-    out = subprocess.check_output(
-        [sys.executable, "-m", "pip", "list", "--outdated", "--format=json"],
-        stderr=subprocess.DEVNULL)
-    data = json.loads(out.decode() or "[]")
-except Exception:
-    sys.exit(0)
-for p in data:
-    if str(p.get("name", "")).lower() == "openpyxl":
-        print(p.get("version", ""), p.get("latest_version", ""))
-        break
-PY
-}
-
-# optional dependency: openpyxl (only needed for formatted .xlsx output).
-# - not installed  -> offer to install it (with a short why), yes/no, then continue
-# - installed       -> check for an update; if one exists, report from->to and ask
-#                      whether to update (you can decline and continue)
-# skipped entirely in non-interactive (-x) runs.
-# (The toolkit's Setup menu also manages this centrally; this is the standalone path.)
-optional_openpyxl_step() {
-    [[ $no_interaction -eq 1 ]] && return 0
-    [[ -x /usr/bin/python3 ]] || return 0
-    /usr/bin/python3 -m pip --version >/dev/null 2>&1 || return 0
-
-    local cur ov nv ans newv
-    if /usr/bin/python3 -c "import openpyxl" >/dev/null 2>&1; then
-        cur=$(_openpyxl_current_version)
-        echo
-        echo "   Checking openpyxl for updates (currently ${cur:-unknown})..."
-        read -r ov nv < <(_openpyxl_update_check)
-        if [[ -z "$nv" ]]; then
-            echo "   openpyxl is up to date."
-            return 0
-        fi
-        echo "   An update is available: openpyxl $ov -> $nv"
-        read -r -p "   Update now? [y/N]: " ans
-        if [[ "$ans" =~ ^[Yy] ]]; then
-            run_with_progress "Updating openpyxl $ov -> $nv" _openpyxl_upgrade
-            newv=$(_openpyxl_current_version)
-            echo "   Updated openpyxl from $ov to ${newv:-$nv}."
-        else
-            echo "   Skipped; continuing with openpyxl ${cur:-$ov}."
-        fi
-        return 0
-    fi
-
-    # not present -> offer the optional install
-    echo
-    echo "Optional: install openpyxl (Python package)?"
-    echo "It lets this tool save results as a formatted .xlsx spreadsheet with"
-    echo "clickable prestage links; without it, results are saved as plain .csv."
-    echo
-    echo "   [1] Continue without it"
-    echo "   [2] Install openpyxl now"
-    echo
-    local sel
-    read -r -p "   Choose by number [1]: " sel
-    if [[ "$sel" == "2" ]]; then
-        run_with_progress "Installing openpyxl" _openpyxl_install
-        newv=$(_openpyxl_current_version)
-        [[ -n "$newv" ]] && echo "   Installed openpyxl $newv."
-    fi
 }
 
 # --------------------------------------------------------------------------------
@@ -708,8 +579,9 @@ while [[ "$#" -gt 0 ]]; do
 done
 echo
 
-# optional dependency check/offer (interactive runs only)
-optional_openpyxl_step
+# jq is required; openpyxl is optional (formatted .xlsx output, else .csv)
+ensure_dependencies jamf-cli jq "openpyxl?" || exit 1
+dependency_present openpyxl && offer_python_package_update openpyxl
 
 # if interactive and no mode was specified on the command line, run the menu
 if [[ $no_interaction -ne 1 && $mode_explicit -ne 1 ]]; then
@@ -730,11 +602,7 @@ if [[ "$mode" == "report" ]]; then
     output_xlsx="${output_dir}/prestage-minimum-os-report.xlsx"
     echo "Instance,PreStage,EnforcementType,SpecificVersion,URL" > "$output_csv"
 
-    if [[ ${#chosen_instances[@]} -eq 1 ]]; then
-        echo "Running on instance: ${chosen_instances[0]}"
-    elif [[ ${#chosen_instances[@]} -gt 1 ]]; then
-        echo "Running on instances: ${chosen_instances[*]}"
-    fi
+    announce_instances
 
     choose_destination_instances
 
@@ -822,11 +690,7 @@ echo "Instance,PreStage,Before,After,Result" > "$output_csv"
 # summary collection (printed as an aligned table once processing is done)
 SUM_INST=(); SUM_NAME=(); SUM_BEFORE=(); SUM_AFTER=(); SUM_RESULT=()
 
-if [[ ${#chosen_instances[@]} -eq 1 ]]; then
-    echo "Running on instance: ${chosen_instances[0]}"
-elif [[ ${#chosen_instances[@]} -gt 1 ]]; then
-    echo "Running on instances: ${chosen_instances[*]}"
-fi
+announce_instances
 
 if [[ -n "$from_file" ]]; then
     run_from_file
