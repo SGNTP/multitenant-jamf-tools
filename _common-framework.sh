@@ -1149,6 +1149,330 @@ run_jamfcli() {
     send_slack_notification "$slack_text"
 }
 
+# --------------------------------------------------------------------------------
+# JAMF-CLI SCRIPT HELPERS (bash 3.2 compatible)
+# --------------------------------------------------------------------------------
+
+# Set $jamf_cli_path, keeping a valid value already set (e.g. from -j).
+resolve_jamf_cli() {
+    if [[ ! -x "$jamf_cli_path" ]]; then
+        jamf_cli_path=$(command -v jamf-cli)
+    fi
+    if [[ ! -x "$jamf_cli_path" ]]; then
+        echo "ERROR: jamf-cli not found. Install it or pass -j /path/to/jamf-cli."
+        return 1
+    fi
+}
+
+# Authenticate against an instance and write its bearer token to
+# $token_file_for_jamfcli for jc(). Replaces the previous instance's token file.
+token_for_instance() {
+    jss_instance="${1:-$jss_instance}"
+    if [[ "$chosen_id" ]]; then
+        set_credentials "$jss_instance" "$chosen_id"
+    else
+        set_credentials "$jss_instance"
+    fi
+    jss_url="$jss_instance"
+    check_token || return 1
+    remove_jamfcli_token
+    token_file_for_jamfcli=$(/usr/bin/mktemp /tmp/jamfcli_token.XXXXXX)
+    echo "$token" > "$token_file_for_jamfcli"
+}
+
+remove_jamfcli_token() {
+    if [[ -n "$token_file_for_jamfcli" ]]; then
+        /bin/rm -f "$token_file_for_jamfcli"
+    fi
+    token_file_for_jamfcli=""
+}
+
+jc() {
+    "$jamf_cli_path" "$@" --url "$jss_url" --token-file "$token_file_for_jamfcli"
+}
+
+# Set $output_dir. Keeps a value already set (e.g. from -o); otherwise offers
+# /tmp or ~/Desktop, defaulting to /tmp when non-interactive.
+choose_output_dir() {
+    local choice
+    if [[ -z "$output_dir" ]]; then
+        output_dir="/tmp"
+        if [[ -t 0 && "${no_interaction:-0}" -ne 1 ]]; then
+            echo
+            echo "Save output files to:"
+            echo "   [1] /tmp"
+            echo "   [2] ~/Desktop"
+            while true; do
+                read -r -p "   Choose by number [1]: " choice
+                case "${choice:-1}" in
+                    1) output_dir="/tmp"; break ;;
+                    2) output_dir="${HOME}/Desktop"; break ;;
+                    *) echo "   Not a valid option." ;;
+                esac
+            done
+        fi
+    fi
+    output_dir="${output_dir/#\~/$HOME}"
+    if ! /bin/mkdir -p "$output_dir"; then
+        echo "ERROR: could not create output directory: $output_dir"
+        return 1
+    fi
+    echo "   Output directory: $output_dir"
+}
+
+# Convert a CSV to a formatted .xlsx (bold frozen header, fitted widths, optional
+# 1-based hyperlink column). On success deletes the CSV and prints the xlsx path;
+# otherwise prints the CSV path and returns 1.
+csv_to_xlsx() {
+    local csv_path="$1" xlsx_path="$2" title="$3" url_col="${4:-0}"
+    if /usr/bin/python3 - "$csv_path" "$xlsx_path" "$title" "$url_col" 2>/dev/null <<'PY'
+import csv, sys
+from openpyxl import Workbook
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
+csv_path, xlsx_path, title, url_col = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+wb = Workbook()
+ws = wb.active
+ws.title = title[:31]
+with open(csv_path, newline="") as f:
+    rows = list(csv.reader(f))
+widths = {}
+for r_idx, row in enumerate(rows, start=1):
+    ws.append(row)
+    for c_idx, val in enumerate(row, start=1):
+        widths[c_idx] = max(widths.get(c_idx, 0), len(val))
+    if r_idx == 1:
+        for c_idx in range(1, len(row) + 1):
+            ws.cell(row=1, column=c_idx).font = Font(bold=True)
+    elif url_col and len(row) >= url_col and row[url_col - 1].startswith("http"):
+        cell = ws.cell(row=r_idx, column=url_col)
+        cell.hyperlink = row[url_col - 1]
+        cell.font = Font(color="0563C1", underline="single")
+for c_idx, w in widths.items():
+    ws.column_dimensions[get_column_letter(c_idx)].width = min(max(w + 2, 10), 80)
+ws.freeze_panes = "A2"
+wb.save(xlsx_path)
+PY
+    then
+        /bin/rm -f "$csv_path"
+        echo "$xlsx_path"
+    else
+        echo "$csv_path"
+        return 1
+    fi
+}
+
+# Interactively pick a computer group on the current instance; sets $group_name.
+choose_computer_group() {
+    local groups_json menu gid gtype name filter lower_filter lower_name i n choice
+    local -a ids=() types=() names=() fnames=() ftypes=()
+    echo "   Listing computer groups on ${jss_instance}..."
+    groups_json=$(jc pro classic-computer-groups list --output json 2>/dev/null)
+    menu=$(printf '%s' "$groups_json" | /usr/bin/python3 -c '
+import json, sys
+try:
+    raw = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+items = raw.get("computer_groups") if isinstance(raw, dict) else raw
+if not isinstance(items, list):
+    items = raw.get("results", []) if isinstance(raw, dict) else []
+def clean(s):
+    return str(s).replace("\t", " ").replace("\n", " ").replace("\r", " ")
+rows = []
+for g in items:
+    if not isinstance(g, dict) or g.get("id") is None or not g.get("name"):
+        continue
+    smart = g.get("is_smart")
+    gtype = "smart" if smart is True else ("static" if smart is False else "?")
+    rows.append((clean(g["id"]), gtype, clean(g["name"])))
+for r in sorted(rows, key=lambda r: r[2].lower()):
+    print("\t".join(r))
+' 2>/dev/null)
+    while IFS=$'\t' read -r gid gtype name; do
+        [[ -z "$name" ]] && continue
+        ids+=("$gid"); types+=("$gtype"); names+=("$name")
+    done <<< "$menu"
+    if [[ ${#names[@]} -eq 0 ]]; then
+        echo "   ERROR: no computer groups found on ${jss_instance}."
+        return 1
+    fi
+
+    echo
+    echo "   Select a computer group (${#names[@]} on ${jss_instance})."
+    read -r -p "   Type part of a name to filter, or press Enter to list all: " filter
+    lower_filter=$(printf '%s' "$filter" | /usr/bin/tr '[:upper:]' '[:lower:]')
+    for i in "${!names[@]}"; do
+        lower_name=$(printf '%s' "${names[$i]}" | /usr/bin/tr '[:upper:]' '[:lower:]')
+        if [[ -z "$lower_filter" || "$lower_name" == *"$lower_filter"* ]]; then
+            ftypes+=("${types[$i]}"); fnames+=("${names[$i]}")
+        fi
+    done
+    n=${#fnames[@]}
+    if [[ $n -eq 0 ]]; then
+        echo "   No group name matches \"${filter}\"."
+        return 1
+    fi
+    echo
+    for i in "${!fnames[@]}"; do
+        printf "     [%d] %-6s %s\n" "$((i + 1))" "${ftypes[$i]}" "${fnames[$i]}"
+    done
+    echo
+    while true; do
+        read -r -p "     Choose by number: " choice
+        choice=$(printf '%s' "$choice" | /usr/bin/tr -d '[:space:]')
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= n )); then
+            group_name="${fnames[$((choice - 1))]}"
+            echo "     Selected: ${group_name}"
+            return 0
+        fi
+        echo "     Not a valid option."
+    done
+}
+
+# Ask how to select target computers. Sets $target_mode (serial | name |
+# name-match | group) plus $target_values (array) or $group_name.
+choose_computer_targets() {
+    local choice input
+    echo
+    echo "Select target computers by:"
+    echo "   [1] Serial number(s)"
+    echo "   [2] Computer name(s)"
+    echo "   [3] Partial computer name"
+    echo "   [4] Computer group (smart or static)"
+    while true; do
+        read -r -p "   Choose by number: " choice
+        case "$choice" in
+            1) target_mode="serial"; break ;;
+            2) target_mode="name"; break ;;
+            3) target_mode="name-match"; break ;;
+            4) target_mode="group"; break ;;
+            *) echo "   Not a valid option." ;;
+        esac
+    done
+    case "$target_mode" in
+        serial|name)
+            read -r -p "   Enter ${target_mode}s, separated by commas: " input
+            target_values=()
+            while IFS= read -r item; do
+                item="${item#"${item%%[![:space:]]*}"}"
+                item="${item%"${item##*[![:space:]]}"}"
+                [[ -n "$item" ]] && target_values+=("$item")
+            done <<< "$(printf '%s' "$input" | /usr/bin/tr ',' '\n')"
+            ;;
+        name-match)
+            read -r -p "   Part of the computer name to match: " input
+            target_values=("$input")
+            ;;
+        group)
+            choose_computer_group || return 1
+            ;;
+    esac
+}
+
+# Resolve $target_mode / $target_values / $group_name on the current instance
+# into the $resolved_serials array.
+resolve_target_serials() {
+    local cname serial out
+    resolved_serials=()
+    case "$target_mode" in
+        serial)
+            resolved_serials=("${target_values[@]}")
+            ;;
+        name)
+            for cname in "${target_values[@]}"; do
+                serial=$(jc pro computer-inventory get --name "$cname" --section HARDWARE \
+                    --output json --no-hints --no-update-check --quiet 2>/dev/null \
+                    | /usr/bin/python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if isinstance(d, dict) and isinstance(d.get("results"), list):
+    d = d["results"][0] if d["results"] else {}
+if isinstance(d, list):
+    d = d[0] if d else {}
+if isinstance(d, dict):
+    print((d.get("hardware") or {}).get("serialNumber") or "")
+' 2>/dev/null)
+                if [[ -n "$serial" ]]; then
+                    resolved_serials+=("$serial")
+                else
+                    echo "   WARNING: no computer named '$cname' found."
+                fi
+            done
+            ;;
+        name-match)
+            echo "   Fetching inventory to match names containing \"${target_values[0]}\"..."
+            out=$(jc pro computer-inventory list --section GENERAL --section HARDWARE \
+                --output json --no-hints --no-update-check --quiet 2>/dev/null \
+                | J_PATTERN="${target_values[0]}" /usr/bin/python3 -c '
+import json, os, sys
+pattern = os.environ.get("J_PATTERN", "").lower()
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+recs = data.get("results", []) if isinstance(data, dict) else data
+for r in recs if isinstance(recs, list) else []:
+    if not isinstance(r, dict):
+        continue
+    name = (r.get("general") or {}).get("name") or ""
+    serial = (r.get("hardware") or {}).get("serialNumber") or ""
+    if serial and pattern in name.lower():
+        print(serial)
+' 2>/dev/null)
+            while IFS= read -r serial; do
+                [[ -n "$serial" ]] && resolved_serials+=("$serial")
+            done <<< "$out"
+            ;;
+        group)
+            echo "   Resolving members of group \"${group_name}\"..."
+            out=$(jc pro classic-computer-groups get --name "$group_name" \
+                --output json --no-hints --no-update-check --quiet 2>/dev/null \
+                | /usr/bin/python3 -c '
+import json, sys
+try:
+    raw = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+grp = raw.get("computer_group", raw) if isinstance(raw, dict) else {}
+for c in grp.get("computers") or []:
+    if isinstance(c, dict) and c.get("serial_number"):
+        print(c["serial_number"])
+' 2>/dev/null)
+            while IFS= read -r serial; do
+                [[ -n "$serial" ]] && resolved_serials+=("$serial")
+            done <<< "$out"
+            ;;
+    esac
+    echo "   ${#resolved_serials[@]} target computer(s)."
+}
+
+# Print the inventory JSON for one serial (tries upper-case first, as Jamf
+# stores serials that way). Extra args are passed as --section values.
+fetch_computer_by_serial() {
+    local serial="$1" upper variant out section
+    local -a section_args=()
+    shift
+    for section in "$@"; do
+        section_args+=(--section "$section")
+    done
+    upper=$(printf '%s' "$serial" | /usr/bin/tr '[:lower:]' '[:upper:]')
+    for variant in "$upper" "$serial"; do
+        out=$(jc pro computer-inventory get --serial "$variant" "${section_args[@]}" \
+            --output json --no-hints --no-update-check --quiet 2>/dev/null)
+        if [[ -n "$out" && "$out" != "null" ]] \
+            && ! printf '%s' "$out" | /usr/bin/grep -q '"exitCode"'; then
+            printf '%s' "$out"
+            return 0
+        fi
+        [[ "$upper" == "$serial" ]] && break
+    done
+    return 1
+}
+
 encode_name() {
     url_encoded_name="$(echo "$1" | sed -e 's| |%20|g' | sed -e 's|&amp;|%26|g')"
     echo "$url_encoded_name"

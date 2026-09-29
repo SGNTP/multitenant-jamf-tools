@@ -15,7 +15,7 @@
 # (empty errors array) even when the write succeeds, so set mode does NOT trust the
 # update's exit code -- it re-reads each prestage and confirms the stored value.
 #
-# Output (in /tmp):
+# Output (in /tmp or ~/Desktop - chosen at run time, or -o DIR):
 #   report : prestage-minimum-os-report.xlsx (URLs hyperlinked) / .csv fallback
 #   set    : prestage-minimum-os-update.xlsx / .csv fallback
 # --------------------------------------------------------------------------------
@@ -36,12 +36,13 @@ dry_run=0
 from_file=""
 use_file_values=0
 type_explicit=0
+output_dir=""
 
 # --------------------------------------------------------------------------------
 # ENVIRONMENT CHECKS
 # --------------------------------------------------------------------------------
 
-DIR=$(dirname "$0")
+DIR=$(/usr/bin/dirname "$0")
 source "$DIR/_common-framework.sh"
 
 if [[ ! -d "${this_script_dir}" ]]; then
@@ -49,13 +50,7 @@ if [[ ! -d "${this_script_dir}" ]]; then
     exit 1
 fi
 
-if [[ ! -f "$jamf_cli_path" ]]; then
-    jamf_cli_path=$(which jamf-cli)
-fi
-if [[ ! -f "$jamf_cli_path" ]]; then
-    echo "ERROR: jamf-cli not found. Please ensure jamf-cli is installed and in your PATH."
-    exit 1
-fi
+resolve_jamf_cli || exit 1
 
 # --------------------------------------------------------------------------------
 # FUNCTIONS
@@ -109,6 +104,7 @@ Instances:
 
 Other:
 -n  | --dry-run                    - (set mode) preview changes; do not write
+-o  | --output-dir DIR             - where to save the report (prompts /tmp or ~/Desktop if omitted)
 -x  | --nointeraction              - run without interaction
 -v                                 - verbose jamf-cli output
 -h  | --help                       - this help
@@ -123,11 +119,6 @@ Examples:
 # Apply values per-row from a file
 ./set-prestage-os-version.sh --set --from-file targets.csv --use-file-values
 USAGE
-}
-
-# run jamf-cli for the current instance ($jss_url + token already set)
-jc() {
-    "$jamf_cli_path" "$@" --url "$jss_url" --token-file "$token_file_for_jamfcli"
 }
 
 # friendly "Label version" for display / logs (drops empty version)
@@ -149,48 +140,23 @@ label_for_type() {
     esac
 }
 
-# obtain a bearer token for a given instance (sets jss_instance/jss_url/token_file_for_jamfcli)
-token_for_instance() {
-    jss_instance="$1"
-    if [[ "$chosen_id" ]]; then
-        set_credentials "$jss_instance" "$chosen_id"
-    else
-        set_credentials "$jss_instance"
-    fi
-    jss_url="$jss_instance"
-    check_token || return 1
-    token_file_for_jamfcli=$(mktemp /tmp/jamfcli_token.XXXXXX)
-    echo "$token" > "$token_file_for_jamfcli"
-}
-
 # ---- report mode ---------------------------------------------------------------
 
 # emit enforced prestages for the current $jss_instance:
 #   name <US> enforcement-type <US> specific-version <US> full URL
 report_prestages_for_instance() {
-    if [[ "$chosen_id" ]]; then
-        set_credentials "$jss_instance" "$chosen_id"
-    else
-        set_credentials "$jss_instance"
-    fi
-    jss_url="${jss_instance}"
-
-    if ! check_token; then
+    if ! token_for_instance "$jss_instance"; then
         echo "   [report] Could not obtain a token for $jss_url. Skipping." >&2
         return 1
     fi
-
-    token_file_for_jamfcli=$(mktemp /tmp/jamfcli_token.XXXXXX)
-    echo "$token" > "$token_file_for_jamfcli"
 
     local verbose_args=()
     [[ $verbose -eq 1 ]] && verbose_args+=("-v")
 
     local prestage_json
-    prestage_json=$("$jamf_cli_path" pro computer-prestages list -o json \
-        --url "$jss_url" --token-file "$token_file_for_jamfcli" "${verbose_args[@]}")
+    prestage_json=$(jc pro computer-prestages list -o json "${verbose_args[@]}")
 
-    rm -f "$token_file_for_jamfcli"
+    remove_jamfcli_token
 
     echo "$prestage_json" | jq -r --arg base "$jss_url" '
         (if type=="object" then .results else . end)[]
@@ -286,8 +252,7 @@ resolve_target_version() {
         exit 1
     fi
     choose_macos_version
-    [[ -n "$token_file_for_jamfcli" ]] && rm -f "$token_file_for_jamfcli"
-    token_file_for_jamfcli=""
+    remove_jamfcli_token
 }
 
 # ---- set mode: apply -----------------------------------------------------------
@@ -327,9 +292,9 @@ print_set_summary() {
         echo "$verb on $inst:"
         printf "   %-*s  %-*s  %-*s  %s\n" "$nw" "PreStage" "$bw" "Before" "$aw" "After" "Result"
         printf "   %-*s  %-*s  %-*s  %s\n" \
-            "$nw" "$(printf '%.0s-' $(seq 1 "$nw"))" \
-            "$bw" "$(printf '%.0s-' $(seq 1 "$bw"))" \
-            "$aw" "$(printf '%.0s-' $(seq 1 "$aw"))" "------"
+            "$nw" "$(printf '%.0s-' $(/usr/bin/seq 1 "$nw"))" \
+            "$bw" "$(printf '%.0s-' $(/usr/bin/seq 1 "$bw"))" \
+            "$aw" "$(printf '%.0s-' $(/usr/bin/seq 1 "$aw"))" "------"
         for i in "${!SUM_NAME[@]}"; do
             [[ "${SUM_INST[$i]}" == "$inst" ]] || continue
             printf "   %-*.*s  %-*.*s  %-*.*s  %s\n" \
@@ -399,21 +364,12 @@ process_prestage() {
 
 # process one instance: obtain token, enumerate prestages, apply to each
 process_instance() {
-    if [[ "$chosen_id" ]]; then
-        set_credentials "$jss_instance" "$chosen_id"
-    else
-        set_credentials "$jss_instance"
-    fi
-    jss_url="${jss_instance}"
-
-    if ! check_token; then
+    if ! token_for_instance "$jss_instance"; then
         echo "   [$jss_instance] could not obtain a token. Skipping instance." >&2
         echo "$jss_instance,\"-\",\"-\",\"-\",NO_TOKEN" >> "$output_csv"
         (( fail_count++ ))
         return
     fi
-    token_file_for_jamfcli=$(mktemp /tmp/jamfcli_token.XXXXXX)
-    echo "$token" > "$token_file_for_jamfcli"
 
     local ids=()
     if [[ -n "$prestage_id" ]]; then
@@ -425,7 +381,7 @@ process_instance() {
             echo "   [$jss_instance] prestage named '$prestage_name' not found. Skipping." >&2
             echo "$jss_instance,\"$prestage_name\",\"-\",\"-\",NOT_FOUND" >> "$output_csv"
             (( fail_count++ ))
-            rm -f "$token_file_for_jamfcli"
+            remove_jamfcli_token
             return
         fi
         ids=("$found")
@@ -441,7 +397,7 @@ process_instance() {
         if [[ ${#ids[@]} -eq 0 ]]; then
             echo "   [$jss_instance] no prestages matching keyword '$prestage_keyword'."
             echo "$jss_instance,\"keyword:$prestage_keyword\",\"-\",\"-\",NO_MATCH" >> "$output_csv"
-            rm -f "$token_file_for_jamfcli"
+            remove_jamfcli_token
             return
         fi
         echo "   [$jss_instance] ${#ids[@]} prestage(s) match keyword '$prestage_keyword'."
@@ -454,7 +410,7 @@ process_instance() {
 
     if [[ ${#ids[@]} -eq 0 ]]; then
         echo "   [$jss_instance] no matching prestages found."
-        rm -f "$token_file_for_jamfcli"
+        remove_jamfcli_token
         return
     fi
 
@@ -464,7 +420,7 @@ process_instance() {
         process_prestage "$pid"
     done
 
-    rm -f "$token_file_for_jamfcli"
+    remove_jamfcli_token
 }
 
 # process targets listed in a CSV. Instance = column 1; prestage id is parsed
@@ -476,8 +432,8 @@ run_from_file() {
     fi
 
     local pairs
-    pairs=$(mktemp /tmp/prestage_targets.XXXXXX)
-    awk -F',' -v s=$'\x1f' 'NR>1 && $1!="" {
+    pairs=$(/usr/bin/mktemp /tmp/prestage_targets.XXXXXX)
+    /usr/bin/awk -F',' -v s=$'\x1f' 'NR>1 && $1!="" {
         line=$0
         idv=""; if (match(line, /id=[0-9]+/)) idv=substr(line, RSTART+3, RLENGTH-3)
         typ=""; ver=""
@@ -487,10 +443,10 @@ run_from_file() {
             else if (f ~ /^[0-9]+\.[0-9.]+$/) ver=f
         }
         if (idv!="") print $1 s idv s typ s ver
-    }' "$from_file" | sort -u > "$pairs"
+    }' "$from_file" | /usr/bin/sort -u > "$pairs"
 
     local total
-    total=$(wc -l < "$pairs" | tr -d ' ')
+    total=$(/usr/bin/wc -l < "$pairs" | /usr/bin/tr -d ' ')
     echo "Loaded $total instance/prestage target(s) from $from_file"
     echo
 
@@ -498,26 +454,15 @@ run_from_file() {
     # version is needed pick it from a numbered menu sourced from the first target
     # instance's available-updates
     resolve_target_type
-    resolve_target_version "$(head -1 "$pairs" | cut -d$'\x1f' -f1)"
+    resolve_target_version "$(/usr/bin/head -1 "$pairs" | /usr/bin/cut -d$'\x1f' -f1)"
 
     local prev="" have_token=0
     while IFS=$'\x1f' read -r inst pid rtype rversion; do
         [[ -z "$inst" || -z "$pid" ]] && continue
         if [[ "$inst" != "$prev" ]]; then
-            if [[ $have_token -eq 1 && -n "$token_file_for_jamfcli" ]]; then
-                rm -f "$token_file_for_jamfcli"
-            fi
+            remove_jamfcli_token
             have_token=0
-            jss_instance="$inst"
-            if [[ "$chosen_id" ]]; then
-                set_credentials "$jss_instance" "$chosen_id"
-            else
-                set_credentials "$jss_instance"
-            fi
-            jss_url="$jss_instance"
-            if check_token; then
-                token_file_for_jamfcli=$(mktemp /tmp/jamfcli_token.XXXXXX)
-                echo "$token" > "$token_file_for_jamfcli"
+            if token_for_instance "$inst"; then
                 have_token=1
                 echo "Processing $jss_instance..."
             else
@@ -547,8 +492,8 @@ run_from_file() {
         process_prestage "$pid"
     done < "$pairs"
 
-    [[ $have_token -eq 1 && -n "$token_file_for_jamfcli" ]] && rm -f "$token_file_for_jamfcli"
-    rm -f "$pairs"
+    remove_jamfcli_token
+    /bin/rm -f "$pairs"
 }
 
 # ---- guided menu (shown when run interactively without --report/--set) ---------
@@ -624,24 +569,24 @@ interactive_menu() {
 run_with_progress() {
     local label="$1"; shift
     local logf pid pct hashes rc
-    logf=$(mktemp /tmp/optpkg.XXXXXX)
+    logf=$(/usr/bin/mktemp /tmp/optpkg.XXXXXX)
     ( "$@" >"$logf" 2>&1 ) &
     pid=$!
     pct=0
     while kill -0 "$pid" 2>/dev/null; do
         pct=$(( pct < 95 ? pct + 5 : 95 ))
-        hashes=$(printf '#%.0s' $(seq 1 $(( pct / 5 ))))
+        hashes=$(printf '#%.0s' $(/usr/bin/seq 1 $(( pct / 5 ))))
         printf "\r   %s: [%-20s] %3d%%" "$label" "$hashes" "$pct"
-        sleep 0.3
+        /bin/sleep 0.3
     done
     wait "$pid"; rc=$?
     if [[ $rc -eq 0 ]]; then
         printf "\r   %s: [%-20s] %3d%%\n" "$label" "####################" 100
     else
         printf "\r   %s: failed (continuing; results will be saved as .csv).\n" "$label"
-        tail -3 "$logf" | sed 's/^/      /'
+        /usr/bin/tail -3 "$logf" | /usr/bin/sed 's/^/      /'
     fi
-    rm -f "$logf"
+    /bin/rm -f "$logf"
     return $rc
 }
 
@@ -649,22 +594,22 @@ run_with_progress() {
 # (lib/jamf-setup.sh: python3 -m pip install --break-system-packages, with a
 # plain fallback for older pip that lacks that flag).
 _openpyxl_install() {
-    python3 -m pip install --break-system-packages openpyxl \
-        || python3 -m pip install openpyxl
+    /usr/bin/python3 -m pip install --break-system-packages openpyxl \
+        || /usr/bin/python3 -m pip install openpyxl
 }
 _openpyxl_upgrade() {
-    python3 -m pip install --break-system-packages --upgrade openpyxl \
-        || python3 -m pip install --upgrade openpyxl
+    /usr/bin/python3 -m pip install --break-system-packages --upgrade openpyxl \
+        || /usr/bin/python3 -m pip install --upgrade openpyxl
 }
 
 # currently installed openpyxl version (empty if not installed)
 _openpyxl_current_version() {
-    python3 -c 'import openpyxl,sys; sys.stdout.write(getattr(openpyxl,"__version__",""))' 2>/dev/null
+    /usr/bin/python3 -c 'import openpyxl,sys; sys.stdout.write(getattr(openpyxl,"__version__",""))' 2>/dev/null
 }
 
 # if an update is available, echo "<current> <latest>"; otherwise echo nothing
 _openpyxl_update_check() {
-    python3 - <<'PY' 2>/dev/null
+    /usr/bin/python3 - <<'PY' 2>/dev/null
 import json, subprocess, sys
 try:
     out = subprocess.check_output(
@@ -688,11 +633,11 @@ PY
 # (The toolkit's Setup menu also manages this centrally; this is the standalone path.)
 optional_openpyxl_step() {
     [[ $no_interaction -eq 1 ]] && return 0
-    command -v python3 >/dev/null 2>&1 || return 0
-    python3 -m pip --version >/dev/null 2>&1 || return 0
+    [[ -x /usr/bin/python3 ]] || return 0
+    /usr/bin/python3 -m pip --version >/dev/null 2>&1 || return 0
 
     local cur ov nv ans newv
-    if python3 -c "import openpyxl" >/dev/null 2>&1; then
+    if /usr/bin/python3 -c "import openpyxl" >/dev/null 2>&1; then
         cur=$(_openpyxl_current_version)
         echo
         echo "   Checking openpyxl for updates (currently ${cur:-unknown})..."
@@ -753,6 +698,7 @@ while [[ "$#" -gt 0 ]]; do
         -a|-ai|--all|--all-instances) all_instances=1 ;;
         --id|--client-id|--user|--username) shift; chosen_id="$1" ;;
         -n|--dry-run)      dry_run=1 ;;
+        -o|--output-dir)   shift; output_dir="$1" ;;
         -x|--nointeraction) no_interaction=1 ;;
         -v|--verbose)      verbose=1 ;;
         -h|--help)         usage; exit 0 ;;
@@ -775,10 +721,13 @@ fail_count=0
 skip_count=0
 dryrun_count=0
 
+choose_output_dir || exit 1
+trap remove_jamfcli_token EXIT
+
 # ================================ REPORT MODE ===================================
 if [[ "$mode" == "report" ]]; then
-    output_csv="/tmp/prestage-minimum-os-report.csv"
-    output_xlsx="/tmp/prestage-minimum-os-report.xlsx"
+    output_csv="${output_dir}/prestage-minimum-os-report.csv"
+    output_xlsx="${output_dir}/prestage-minimum-os-report.xlsx"
     echo "Instance,PreStage,EnforcementType,SpecificVersion,URL" > "$output_csv"
 
     if [[ ${#chosen_instances[@]} -eq 1 ]]; then
@@ -822,46 +771,14 @@ if [[ "$mode" == "report" ]]; then
         echo
         printf "   %-*s  %-16s  %-8s  %s\n" "$nw" "PreStage" "Enforcement" "Version" "Link"
         printf "   %-*s  %-16s  %-8s  %s\n" "$nw" \
-            "$(printf '%.0s-' $(seq 1 "$nw"))" "----------------" "--------" "------------------------------"
+            "$(printf '%.0s-' $(/usr/bin/seq 1 "$nw"))" "----------------" "--------" "------------------------------"
         for i2 in "${!r_names[@]}"; do
             printf "   %-*.*s  %-16s  %-8s  %s\n" "$nw" "$nw" \
                 "${r_names[$i2]}" "${r_labels[$i2]}" "${r_vers[$i2]}" "${r_links[$i2]}"
         done
     done
 
-    final_output="$output_csv"
-    if command -v python3 >/dev/null 2>&1 && python3 -c "import openpyxl" >/dev/null 2>&1; then
-        if python3 - "$output_csv" "$output_xlsx" <<'PY'
-import csv, sys
-from openpyxl import Workbook
-from openpyxl.styles import Font
-csv_path, xlsx_path = sys.argv[1], sys.argv[2]
-wb = Workbook(); ws = wb.active; ws.title = "PreStage Min OS"
-link_font = Font(color="0563C1", underline="single")
-header_font = Font(bold=True)
-with open(csv_path, newline="") as f:
-    rows = list(csv.reader(f))
-url_col = 5
-for r_idx, row in enumerate(rows, start=1):
-    ws.append(row)
-    if r_idx == 1:
-        for c_idx in range(1, len(row) + 1):
-            ws.cell(row=1, column=c_idx).font = header_font
-        continue
-    if len(row) >= url_col and row[url_col - 1].startswith("http"):
-        cell = ws.cell(row=r_idx, column=url_col)
-        cell.hyperlink = row[url_col - 1]
-        cell.font = link_font
-for col, width in {"A": 34, "B": 30, "C": 30, "D": 16, "E": 66}.items():
-    ws.column_dimensions[col].width = width
-ws.freeze_panes = "A2"
-wb.save(xlsx_path)
-PY
-        then
-            rm -f "$output_csv"
-            final_output="$output_xlsx"
-        fi
-    fi
+    final_output=$(csv_to_xlsx "$output_csv" "$output_xlsx" "PreStage Min OS" 5)
 
     echo
     echo "Found $enforced_count Computer PreStage(s) with macOS version enforcement."
@@ -898,8 +815,8 @@ echo "Mode: set"
 echo "Scope: $scope_desc"
 [[ $dry_run -eq 1 ]] && echo "(dry-run: no changes will be written)"
 
-output_csv="/tmp/prestage-minimum-os-update.csv"
-output_xlsx="/tmp/prestage-minimum-os-update.xlsx"
+output_csv="${output_dir}/prestage-minimum-os-update.csv"
+output_xlsx="${output_dir}/prestage-minimum-os-update.xlsx"
 echo "Instance,PreStage,Before,After,Result" > "$output_csv"
 
 # summary collection (printed as an aligned table once processing is done)
@@ -930,31 +847,7 @@ fi
 # aligned summary of what happened / will happen, grouped by instance
 print_set_summary
 
-final_output="$output_csv"
-if command -v python3 >/dev/null 2>&1 && python3 -c "import openpyxl" >/dev/null 2>&1; then
-    if python3 - "$output_csv" "$output_xlsx" <<'PY'
-import csv, sys
-from openpyxl import Workbook
-from openpyxl.styles import Font
-csv_path, xlsx_path = sys.argv[1], sys.argv[2]
-wb = Workbook(); ws = wb.active; ws.title = "PreStage Min OS Update"
-with open(csv_path, newline="") as f:
-    rows = list(csv.reader(f))
-for i, row in enumerate(rows, start=1):
-    ws.append(row)
-    if i == 1:
-        for c in range(1, len(row) + 1):
-            ws.cell(row=1, column=c).font = Font(bold=True)
-for col, width in {"A": 40, "B": 34, "C": 34, "D": 34, "E": 12}.items():
-    ws.column_dimensions[col].width = width
-ws.freeze_panes = "A2"
-wb.save(xlsx_path)
-PY
-    then
-        rm -f "$output_csv"
-        final_output="$output_xlsx"
-    fi
-fi
+final_output=$(csv_to_xlsx "$output_csv" "$output_xlsx" "PreStage Min OS Update" 0)
 
 echo
 echo "Done."

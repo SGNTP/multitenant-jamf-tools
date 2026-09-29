@@ -36,11 +36,24 @@ fi
 # ARGS
 # -------------------------------------------------------------------------
 
-target_serials=()
-target_names=()
-name_match_pattern=""
+target_mode=""
+target_values=()
 group_name=""
 app_patterns=()
+output_dir=""
+
+# Record a target mode, rejecting a second, different one.
+set_target_mode() {
+    if [[ -n "$target_mode" && "$target_mode" != "$1" ]]; then
+        echo "ERROR: only one of --serial, --name, --name-match, --group may be used at a time."
+        exit 1
+    fi
+    target_mode="$1"
+}
+
+to_lower() {
+    printf '%s' "$1" | /usr/bin/tr '[:upper:]' '[:lower:]'
+}
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
@@ -50,30 +63,23 @@ while [[ "$#" -gt 0 ]]; do
         --id|--client-id)     shift; chosen_id="$1" ;;
         -x|--nointeraction)   no_interaction=1 ;;
         -v|--verbose)         verbose=1 ;;
-        --app)
-            shift
-            app_patterns+=("${1,,}")   # store lowercase
-            ;;
-        --serial)
+        -j|--jamf-cli)        shift; jamf_cli_path="$1" ;;
+        -o|--output-dir)      shift; output_dir="$1" ;;
+        --app)                shift; app_patterns+=("$(to_lower "$1")") ;;
+        --serial|--name)
+            set_target_mode "${1#--}"
             shift
             while [[ "$#" -gt 0 && "$1" != -* ]]; do
-                target_serials+=("$1"); shift
+                target_values+=("$1"); shift
             done
             continue
             ;;
-        --name)
-            shift
-            while [[ "$#" -gt 0 && "$1" != -* ]]; do
-                target_names+=("$1"); shift
-            done
-            continue
-            ;;
-        --name-match)  shift; name_match_pattern="$1" ;;
-        --group)       shift; group_name="$1" ;;
+        --name-match)  set_target_mode "name-match"; shift; target_values=("$1") ;;
+        --group)       set_target_mode "group"; shift; group_name="$1" ;;
         -h|--help)
             echo "Usage: $0 [MJT flags] --app PATTERN [--app PATTERN ...] [target flags]"
             echo ""
-            echo "Target (pick one):"
+            echo "Target (pick one; interactive menu if omitted):"
             echo "  --serial S1 S2 ...       Explicit serial numbers"
             echo "  --name N1 N2 ...         Exact computer names"
             echo "  --name-match PATTERN     Partial name match"
@@ -83,12 +89,20 @@ while [[ "$#" -gt 0 ]]; do
             echo "  --app PATTERN            Substring match (repeat for multiple apps)"
             echo "                           (interactive prompt if omitted)"
             echo ""
+            echo "Output:"
+            echo "  -o  | --output-dir DIR   Where to save the CSV (prompts /tmp or ~/Desktop if omitted)"
+            echo ""
             echo "MJT flags:"
             echo "  -il | --instance-list FILENAME"
             echo "  -i  | --instance URL"
             echo "  -a  | --all-instances"
             echo "  --id | --client-id CLIENT_ID"
+            echo "  -j  | --jamf-cli PATH"
             exit 0
+            ;;
+        *)
+            echo "ERROR: unknown option: $1 (see --help)"
+            exit 1
             ;;
     esac
     shift
@@ -98,10 +112,9 @@ done
 if [[ ${#app_patterns[@]} -eq 0 ]]; then
     echo "Enter app names to check (one per line, blank line to finish):"
     while true; do
-        printf '  App pattern: '
-        read -r p
+        read -r -p '  App pattern: ' p
         [[ -z "$p" ]] && break
-        app_patterns+=("${p,,}")
+        app_patterns+=("$(to_lower "$p")")
     done
 fi
 
@@ -110,25 +123,16 @@ if [[ ${#app_patterns[@]} -eq 0 ]]; then
     exit 1
 fi
 
-# Validate: exactly one target mode must be set
-target_mode_count=0
-[[ ${#target_serials[@]} -gt 0 ]] && (( target_mode_count++ ))
-[[ ${#target_names[@]} -gt 0 ]]   && (( target_mode_count++ ))
-[[ -n "$name_match_pattern" ]]     && (( target_mode_count++ ))
-[[ -n "$group_name" ]]             && (( target_mode_count++ ))
-
-if [[ $target_mode_count -eq 0 ]]; then
+if [[ -z "$target_mode" && ( "${no_interaction:-0}" -eq 1 || ! -t 0 ) ]]; then
     echo "ERROR: specify a target via --serial, --name, --name-match, or --group."
-    exit 1
-fi
-if [[ $target_mode_count -gt 1 ]]; then
-    echo "ERROR: only one of --serial, --name, --name-match, --group may be used at a time."
     exit 1
 fi
 
 # -------------------------------------------------------------------------
 # INSTANCE SELECTION
 # -------------------------------------------------------------------------
+
+resolve_jamf_cli || exit 1
 
 choose_destination_instances
 
@@ -141,115 +145,21 @@ if [[ ${#instance_choice_array[@]} -gt 1 ]]; then
     echo "NOTE: this report runs against one instance at a time. Using: $jss_instance"
 fi
 
-if [[ -n "$chosen_id" ]]; then
-    set_credentials "$jss_instance" "$chosen_id"
-else
-    set_credentials "$jss_instance"
+trap remove_jamfcli_token EXIT
+if ! token_for_instance "$jss_instance"; then
+    echo "ERROR: could not obtain a token for $jss_instance"
+    exit 1
 fi
-check_token "$jss_instance"
-
-token_file=$(/usr/bin/mktemp /tmp/jamfcli_token.XXXXXX)
-echo "$token" > "$token_file"
-trap '/bin/rm -f "$token_file"' EXIT
 
 # -------------------------------------------------------------------------
 # RESOLVE TARGET SERIALS
 # -------------------------------------------------------------------------
 
-resolved_serials=()
-
-if [[ ${#target_serials[@]} -gt 0 ]]; then
-    resolved_serials=("${target_serials[@]}")
-
-elif [[ ${#target_names[@]} -gt 0 ]]; then
-    echo "Resolving serials for ${#target_names[@]} computer name(s)..."
-    for cname in "${target_names[@]}"; do
-        serial=$(jamf-cli pro computer-inventory get \
-            --name "$cname" \
-            --section GENERAL \
-            --url "$jss_instance" \
-            --token-file "$token_file" \
-            -o json --no-hints --no-update-check --quiet 2>/dev/null \
-            | /usr/local/autopkg/python -c '
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    if isinstance(d, dict) and "results" in d:
-        d = d["results"][0] if d["results"] else {}
-    if isinstance(d, list):
-        d = d[0] if d else {}
-    print(d.get("general", {}).get("serialNumber") or "")
-except Exception:
-    pass
-' 2>/dev/null)
-        if [[ -n "$serial" ]]; then
-            resolved_serials+=("$serial")
-        else
-            echo "  WARNING: no serial found for computer name '$cname'"
-        fi
-    done
-
-elif [[ -n "$name_match_pattern" ]]; then
-    echo "Fetching inventory to match names containing \"$name_match_pattern\"..."
-    list_json=$(jamf-cli pro computers-inventory list \
-        --all \
-        --section GENERAL \
-        --url "$jss_instance" \
-        --token-file "$token_file" \
-        -o json --no-hints --no-update-check --quiet 2>/dev/null)
-    if [[ -z "$list_json" ]]; then
-        echo "ERROR: failed to fetch computer inventory."
-        exit 1
-    fi
-    mapfile -t resolved_serials < <(/usr/local/autopkg/python -c "
-import sys, json
-pattern = '${name_match_pattern}'.lower()
-try:
-    data = json.loads(sys.argv[1])
-    recs = data.get('results', data) if isinstance(data, dict) else data
-    if not isinstance(recs, list):
-        recs = []
-    for r in recs:
-        if not isinstance(r, dict):
-            continue
-        name = (r.get('general') or {}).get('name') or ''
-        if pattern in name.lower():
-            serial = (r.get('general') or {}).get('serialNumber') or ''
-            if serial:
-                print(serial)
-except Exception:
-    pass
-" "$list_json" 2>/dev/null)
-    echo "  Found ${#resolved_serials[@]} computer(s) matching \"$name_match_pattern\"."
-
-elif [[ -n "$group_name" ]]; then
-    echo "Resolving members of group \"$group_name\"..."
-    group_json=$(jamf-cli pro classic-computer-groups get \
-        --name "$group_name" \
-        --output json \
-        --url "$jss_instance" \
-        --token-file "$token_file" \
-        --no-hints --no-update-check --quiet 2>/dev/null)
-    if [[ -z "$group_json" ]]; then
-        echo "ERROR: could not fetch group \"$group_name\"."
-        exit 1
-    fi
-    mapfile -t resolved_serials < <(/usr/local/autopkg/python -c "
-import sys, json
-try:
-    raw = json.loads(sys.argv[1])
-    grp = raw.get('computer_group', raw) if isinstance(raw, dict) else raw
-    comps = grp.get('computers', []) if isinstance(grp, dict) else []
-    for c in comps:
-        if isinstance(c, dict):
-            s = c.get('serial_number') or ''
-            if s:
-                print(s)
-except Exception:
-    pass
-" "$group_json" 2>/dev/null)
-    echo "  Group has ${#resolved_serials[@]} member computer(s)."
+if [[ -z "$target_mode" ]]; then
+    choose_computer_targets || exit 1
 fi
+
+resolve_target_serials
 
 if [[ ${#resolved_serials[@]} -eq 0 ]]; then
     echo "ERROR: no target computers resolved."
@@ -263,13 +173,14 @@ fi
 timestamp=$(/bin/date '+%Y%m%d-%H%M%S')
 instance_short="${jss_instance#*://}"
 instance_short="${instance_short%%/*}"
-csv_file="/tmp/report-app-installs_${instance_short}_${timestamp}.csv"
+choose_output_dir || exit 1
+csv_file="${output_dir}/report-app-installs_${instance_short}_${timestamp}.csv"
 
 # Header: Serial, Computer Name, Username, one column per app
 {
     printf 'Serial,Computer Name,Username'
     for p in "${app_patterns[@]}"; do
-        printf ',%s' "$p"
+        printf ',"%s"' "${p//\"/\"\"}"
     done
     printf '\n'
 } > "$csv_file"
@@ -278,28 +189,6 @@ csv_file="/tmp/report-app-installs_${instance_short}_${timestamp}.csv"
 # FETCH AND PARSE
 # -------------------------------------------------------------------------
 
-fetch_inventory() {
-    local serial="$1" upper out variant
-    upper=$(printf '%s' "$serial" | /usr/bin/tr 'a-z' 'A-Z')
-    for variant in "$upper" "$serial"; do
-        out=$(jamf-cli pro computer-inventory get \
-            --serial "$variant" \
-            --section GENERAL \
-            --section APPLICATIONS \
-            --section USER_AND_LOCATION \
-            --url "$jss_instance" \
-            --token-file "$token_file" \
-            -o json --no-hints --no-update-check --quiet 2>/dev/null)
-        if [[ -n "$out" && "$out" != "null" ]] \
-            && ! printf '%s' "$out" | /usr/bin/grep -q '"exitCode"'; then
-            printf '%s' "$out"
-            return 0
-        fi
-        [[ "$upper" == "$serial" ]] && break
-    done
-    return 1
-}
-
 echo ""
 echo "Querying ${#resolved_serials[@]} computer(s) on $jss_instance..."
 echo ""
@@ -307,7 +196,7 @@ echo ""
 for serial in "${resolved_serials[@]}"; do
     printf "  %-14s ... " "$serial"
 
-    inv_json=$(fetch_inventory "$serial")
+    inv_json=$(fetch_computer_by_serial "$serial" GENERAL APPLICATIONS USER_AND_LOCATION)
 
     if [[ -z "$inv_json" ]]; then
         echo "NOT FOUND in Jamf"
@@ -319,17 +208,11 @@ for serial in "${resolved_serials[@]}"; do
         continue
     fi
 
-    # Build a JSON array of patterns and pass to Python in one call
-    patterns_json=$(printf '%s\n' "${app_patterns[@]}" | /usr/local/autopkg/python -c '
-import sys, json
-lines = [l.rstrip() for l in sys.stdin]
-print(json.dumps(lines))
-')
+    patterns=$(printf '%s\n' "${app_patterns[@]}")
+    row=$(printf '%s' "$inv_json" | J_PATTERNS="$patterns" J_SERIAL="$serial" /usr/bin/python3 -c '
+import csv, io, json, os, sys
 
-    row=$(printf '%s' "$inv_json" | PATTERNS="$patterns_json" /usr/local/autopkg/python -c '
-import sys, json, os
-
-patterns = json.loads(os.environ.get("PATTERNS", "[]"))
+patterns = [p for p in os.environ.get("J_PATTERNS", "").split("\n") if p]
 
 try:
     data = json.load(sys.stdin)
@@ -343,26 +226,19 @@ if isinstance(data, list):
 if not isinstance(data, dict):
     sys.exit(1)
 
-general  = data.get("general") or {}
-name     = general.get("name") or ""
+name     = (data.get("general") or {}).get("name") or ""
 ul       = data.get("userAndLocation") or {}
 username = (ul.get("username") or ul.get("realname") or "").strip()
 apps     = data.get("applications") or []
 app_names_lower = [str(a.get("name") or "").lower() for a in apps if isinstance(a, dict)]
 
-results = []
-for p in patterns:
-    installed = any(p in n for n in app_names_lower)
-    results.append("Installed" if installed else "Not Installed")
+results = ["Installed" if any(p in n for n in app_names_lower) else "Not Installed" for p in patterns]
 
-def esc(s):
-    s = str(s)
-    if "," in s or "\"" in s or "\n" in s:
-        return "\"" + s.replace("\"", "\"\"") + "\""
-    return s
-
-parts = [esc(name), esc(username)] + [esc(r) for r in results]
-print("\t".join(parts))
+# Line 1: console summary. Line 2: finished CSV row.
+print("%s (%s, user: %s)" % (" | ".join(results), name, username or "unknown"))
+buf = io.StringIO()
+csv.writer(buf, lineterminator="").writerow([os.environ.get("J_SERIAL", ""), name, username] + results)
+print(buf.getvalue())
 ' 2>/dev/null)
 
     if [[ -z "$row" ]]; then
@@ -375,23 +251,8 @@ print("\t".join(parts))
         continue
     fi
 
-    IFS=$'\t' read -r -a fields <<< "$row"
-    c_name="${fields[0]}"
-    c_user="${fields[1]}"
-    statuses=("${fields[@]:2}")
-
-    summary=""
-    for s in "${statuses[@]}"; do
-        [[ -n "$summary" ]] && summary+=" | "
-        summary+="$s"
-    done
-    printf '%s (%s, user: %s)\n' "$summary" "$c_name" "${c_user:-unknown}"
-
-    printf '%s,%s,%s' "$serial" "$c_name" "$c_user" >> "$csv_file"
-    for s in "${statuses[@]}"; do
-        printf ',%s' "$s" >> "$csv_file"
-    done
-    printf '\n' >> "$csv_file"
+    printf '%s\n' "${row%%$'\n'*}"
+    printf '%s\n' "${row#*$'\n'}" >> "$csv_file"
 done
 
 echo ""

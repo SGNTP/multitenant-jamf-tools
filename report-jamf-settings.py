@@ -4491,7 +4491,13 @@ def main() -> int:
     parser.add_argument("--name-pattern", help="Glob pattern for profile names", default="")
     parser.add_argument(
         "--output-prefix",
-        help="Output directory/stem. Defaults to /tmp/<profile>-<YYYYMMDD>",
+        help="Output directory/stem. Defaults to <output-dir>/<profile>-jamfmsp-settings",
+        default="",
+    )
+    parser.add_argument(
+        "--output-dir", dest="output_dir",
+        help="Folder for output files. If omitted, choose /tmp or ~/Desktop "
+             "(defaults to /tmp when not interactive)",
         default="",
     )
     parser.add_argument(
@@ -4617,6 +4623,10 @@ def main() -> int:
     # dated output file. Format and sheet selections above are shared, so the
     # user is only asked once. In the common (default-filename) path the profile
     # name is embedded in each filename, so multiple instances never collide.
+    # ── Output folder: asked once, shared across every instance ──────────────
+    if fmt != FMT_TERMINAL and not args.output_prefix and not args.output_dir:
+        args.output_dir = _choose_output_dir()
+
     _rc = 0
     _multi = len(_instances) > 1
     if _multi and args.output_prefix:
@@ -4633,6 +4643,41 @@ def main() -> int:
             _ui_section(f"Instance {_idx}/{len(_instances)}: {_label}")
         _rc = _export_one(args, fmt, selected_sheets, terminal_dataset) or _rc
     return _rc
+
+
+def _choose_output_dir() -> str:
+    """Offer /tmp or ~/Desktop by number; /tmp when there is no terminal."""
+    if not sys.stdin.isatty():
+        return "/tmp"
+    print("\nSave output files to:")
+    print("   [1] /tmp")
+    print("   [2] ~/Desktop")
+    while True:
+        try:
+            choice = input("   Choose by number [1]: ").strip() or "1"
+        except EOFError:
+            return "/tmp"
+        if choice == "1":
+            return "/tmp"
+        if choice == "2":
+            return str(pathlib.Path.home() / "Desktop")
+        print("   Not a valid option.")
+
+
+def _instance_label(profile: "str | None") -> str:
+    """Name used in filenames and as the xlsx password for this instance.
+
+    In MJT wrapper mode there is no jamf-cli profile, so use the first label
+    of the instance hostname (https://acme.jamfcloud.com -> acme). Otherwise
+    use the profile name, resolving jamf-cli's default profile when unset.
+    """
+    if _OVERRIDE_URL:
+        from urllib.parse import urlparse
+        host = urlparse(_OVERRIDE_URL).hostname or _OVERRIDE_URL
+        return host.split(".")[0] or host
+    if profile:
+        return profile
+    return _jamfcli_default_profile(subprocess.run) or "default"
 
 
 def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
@@ -4697,26 +4742,22 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
         1,
     )
 
+    # raw_profile names the tenant (filename + xlsx password); safe_profile is
+    # the filename-safe form. Both are needed whether or not --output-prefix
+    # is given.
+    import re as _re
+    raw_profile = _instance_label(args.profile)
+    safe_profile = _re.sub(r"[^\w.\-]", "-", raw_profile)
+    safe_profile = _re.sub(r"-{2,}", "-", safe_profile).strip("-")
     if args.output_prefix:
         prefix = pathlib.Path(args.output_prefix).expanduser()
     else:
-        datestamp = datetime.now().strftime("%Y%m%d")
-        # Sanitise the jamf-cli profile name so it is safe to embed in a filename.
-        # When args.profile is None (user accepted the interactive default OR
-        # they didn't pass --profile), resolve the actual default-profile name
-        # via `jamf-cli config show` so the filename + password reflect the
-        # real tenant rather than the literal string "default".
-        import re as _re
-        raw_profile = args.profile
-        if not raw_profile:
-            raw_profile = _jamfcli_default_profile(subprocess.run) or "default"
-        safe_profile = _re.sub(r"[^\w.\-]", "-", raw_profile)
-        safe_profile = _re.sub(r"-{2,}", "-", safe_profile).strip("-")
         # Convention aligned with the .command toolkit:
-        #   /tmp/<profile>-<slug>-<YYYYMMDD>.<ext>
+        #   <output-dir>/<profile>-<slug>-<YYYYMMDD>.<ext>
         # Slug is "jamfmsp-settings" — this exporter covers both macOS and
         # iOS now, so the generic Jamf MSP name fits better than "macos-".
-        prefix = pathlib.Path("/tmp") / f"{safe_profile}-jamfmsp-settings"
+        out_dir = pathlib.Path(args.output_dir or "/tmp").expanduser()
+        prefix = out_dir / f"{safe_profile}-jamfmsp-settings"
 
     # Filename convention: <profile>-<slug>-<YYYYMMDD>.<ext>
     datestamp = datetime.now().strftime("%Y%m%d")
@@ -8873,10 +8914,10 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
             pass
 
     elif fmt == FMT_CSV:
-        # Output folder: /tmp/<profile>-jamfmsp-settings-<YYYYMMDD>/
+        # Output folder: <prefix>-<YYYYMMDD>/ (e.g. /tmp/<profile>-jamfmsp-settings-<YYYYMMDD>/)
         # Convention matches the .command toolkit; the subfolder contains one
-        # CSV per sheet so /tmp doesn't get cluttered with 10+ files per run.
-        csv_dir = pathlib.Path("/tmp") / f"{safe_profile}-jamfmsp-settings-{datestamp}"
+        # CSV per sheet so the output folder doesn't get cluttered with 10+ files per run.
+        csv_dir = prefix.with_name(f"{prefix.name}-{datestamp}")
         csv_dir.mkdir(parents=True, exist_ok=True)
 
         # Derive a safe filename slug from each sheet name

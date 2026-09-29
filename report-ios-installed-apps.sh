@@ -28,7 +28,7 @@ instance_list_type="ios"
 # ENVIRONMENT CHECKS
 # --------------------------------------------------------------------------------
 
-DIR=$(dirname "$0")
+DIR=$(/usr/bin/dirname "$0")
 source "$DIR/_common-framework.sh"
 
 if [[ ! -d "${this_script_dir}" ]]; then
@@ -36,7 +36,8 @@ if [[ ! -d "${this_script_dir}" ]]; then
     exit 1
 fi
 
-output_dir="/tmp/iOS-App-Reports"
+output_dir=""
+inventory_cache_dir="${output_location}/ios-inventory"
 match_mode="contains"
 page_size=100
 app_filter=""
@@ -71,7 +72,7 @@ in the fleet, and pick one by number.
 -il | --instance-list FILENAME     - instance list filename (without .txt)
 -ai | --all-instances              - run against ALL instances in the instance list
 --user | --client-id CLIENT_ID     - use the specified client ID or username
--o  | --output PATH                - output folder (default /tmp/iOS-App-Reports)
+-o  | --output-dir PATH            - output folder (prompts /tmp or ~/Desktop if omitted)
 --filter STRING                    - skip the search prompt and narrow the numbered
                                      app list with STRING straight away
 --bundle BUNDLE_ID                 - report on an exact bundle ID, no prompting
@@ -108,7 +109,7 @@ USAGE
 # fetch the mobile device inventory for $jss_instance into $inventory_json
 # --------------------------------------------------------------------------------
 fetch_inventory() {
-    inventory_json="${output_dir}/.inventory-${instance_pretty}.json"
+    inventory_json="${inventory_cache_dir}/inventory-${instance_pretty}.json"
 
     if [[ $reuse_json -eq 1 && -s "$inventory_json" ]]; then
         echo "   [report] Reusing existing inventory: $inventory_json"
@@ -116,31 +117,26 @@ fetch_inventory() {
     fi
 
     # credentials come from the Keychain via the common framework
-    if [[ "$chosen_id" ]]; then
-        set_credentials "$jss_instance" "$chosen_id"
-    else
-        set_credentials "$jss_instance"
-    fi
-    jss_url="$jss_instance"
-
-    # build the jamf-cli arguments; run_jamfcli appends --url and --token-file
-    args=(
-        pro mobile-devices list
-        --section GENERAL
-        --section HARDWARE
-        --section USER_AND_LOCATION
-        --section APPLICATIONS
-        --page-size "$page_size"
-        --output json
-        --out-file "$inventory_json"
-        --no-hints
-    )
-
-    echo "   [report] Fetching mobile device inventory (this can take a minute)..."
-    if ! run_jamfcli; then
-        echo "   [report] ERROR: jamf-cli call failed for $instance_pretty"
+    if ! token_for_instance "$jss_instance"; then
+        echo "   [report] ERROR: could not obtain a token for $instance_pretty"
         return 1
     fi
+
+    echo "   [report] Fetching mobile device inventory (this can take a minute)..."
+    if ! jc pro mobile-devices list \
+        --section GENERAL \
+        --section HARDWARE \
+        --section USER_AND_LOCATION \
+        --section APPLICATIONS \
+        --page-size "$page_size" \
+        --output json \
+        --out-file "$inventory_json" \
+        --no-hints; then
+        echo "   [report] ERROR: jamf-cli call failed for $instance_pretty"
+        remove_jamfcli_token
+        return 1
+    fi
+    remove_jamfcli_token
 
     if [[ ! -s "$inventory_json" ]]; then
         echo "   [report] ERROR: no JSON returned for $instance_pretty"
@@ -446,7 +442,7 @@ while [[ "$#" -gt 0 ]]; do
         shift
         chosen_id="$1"
         ;;
-    -o | --output)
+    -o | --output-dir | --output)
         shift
         output_dir="$1"
         ;;
@@ -472,7 +468,7 @@ while [[ "$#" -gt 0 ]]; do
         shift
         page_size="$1"
         ;;
-    -j | --jamf-cli-path)
+    -j | --jamf-cli | --jamf-cli-path)
         shift
         jamf_cli_path="$1"
         ;;
@@ -494,14 +490,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 echo
 
-# locate jamf-cli
-if [[ ! -f "$jamf_cli_path" ]]; then
-    jamf_cli_path=$(which jamf-cli)
-fi
-if [[ ! -f "$jamf_cli_path" ]]; then
-    echo "ERROR: jamf-cli not found. Install it or pass -j /path/to/jamf-cli."
-    exit 1
-fi
+resolve_jamf_cli || exit 1
 
 if [[ ! -x /usr/bin/jq ]] && ! /usr/bin/which -s jq; then
     echo "ERROR: jq not found. Install it with: brew install jq"
@@ -513,7 +502,11 @@ if [[ $list_apps_only -eq 1 ]]; then
     app_name=""
 fi
 
-/bin/mkdir -p "$output_dir"
+/bin/mkdir -p "$inventory_cache_dir"
+if [[ $list_apps_only -eq 0 ]]; then
+    choose_output_dir || exit 1
+fi
+trap remove_jamfcli_token EXIT
 
 # MJT instance selection (prompts unless -i / -ai given)
 choose_destination_instances

@@ -31,6 +31,8 @@ fi
 # --------------------------------------------------------------------------------
 
 forward_args=()
+output_dir=""
+ask_output_dir=1
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
         -il|--instance-list) shift; chosen_instance_list_file="$1" ;;
@@ -38,6 +40,12 @@ while [[ "$#" -gt 0 ]]; do
         -a|--all-instances)  all_instances=1 ;;
         --id|--client-id)    shift; chosen_id="$1" ;;
         -x|--nointeraction)  no_interaction=1 ;;
+        -o|--output-dir)     shift; output_dir="$1" ;;
+        --output-prefix)     ask_output_dir=0; forward_args+=("$1" "$2"); shift ;;
+        --format)
+            [[ "$2" == "terminal" ]] && ask_output_dir=0
+            forward_args+=("$1" "$2"); shift
+            ;;
         -h|--help)
             echo "Usage: $0 [-il INSTANCE_LIST] [-i INSTANCE_URL] [--sheets SLUGS] [python-args...]"
             echo ""
@@ -46,6 +54,7 @@ while [[ "$#" -gt 0 ]]; do
             echo "  -i  | --instance URL             specific instance"
             echo "  -a  | --all-instances            all instances in the list"
             echo "  --id | --client-id CLIENT_ID     use specified client ID"
+            echo "  -o  | --output-dir DIR           output folder (prompts /tmp or ~/Desktop if omitted)"
             echo ""
             echo "All other flags are forwarded to report-jamf-settings.py."
             echo "Run: python3 report-jamf-settings.py --help  for the full list."
@@ -62,30 +71,31 @@ done
 
 choose_destination_instances
 
+# ask once for the output folder; the Python script is run once per instance
+output_args=()
+if [[ $ask_output_dir -eq 1 ]]; then
+    choose_output_dir || exit 1
+    output_args=(--output-dir "$output_dir")
+fi
+
+trap remove_jamfcli_token EXIT
+
 for jss_instance in "${instance_choice_array[@]}"; do
     echo ""
     echo "Running report-jamf-settings on $jss_instance ..."
 
-    if [[ -n "$chosen_id" ]]; then
-        set_credentials "$jss_instance" "$chosen_id"
-    else
-        set_credentials "$jss_instance"
-    fi
-
-    if ! check_token "$jss_instance"; then
+    if ! token_for_instance "$jss_instance"; then
         echo "ERROR: could not obtain token for $jss_instance"
         continue
     fi
 
-    token_file_for_python=$(/usr/bin/mktemp /tmp/jamfcli_token.XXXXXX)
-    echo "$token" > "$token_file_for_python"
-
     /usr/bin/python3 "$python_script" \
         --url "$jss_instance" \
-        --token-file "$token_file_for_python" \
+        --token-file "$token_file_for_jamfcli" \
+        "${output_args[@]}" \
         "${forward_args[@]}"
 
-    /bin/rm -f "$token_file_for_python"
+    remove_jamfcli_token
 done
 
 echo ""

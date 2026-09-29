@@ -28,8 +28,8 @@
 #        - Per-declaration report: one row per declaration across all devices.
 #
 # Per-instance CSVs (multi-instance runs don't clobber each other) are written
-# to $HOME/Library/Logs/JAMF/blueprint-status/<host>-<yyyymmdd-HHMMSS>-<mode>.csv
-# by default; override with --output-dir DIR.
+# to <dir>/<host>-<yyyymmdd-HHMMSS>-<mode>.csv, where <dir> is /tmp or ~/Desktop
+# (chosen at run time) or --output-dir DIR.
 # --------------------------------------------------------------------------------
 
 # set instance list type (Computers = mac)
@@ -53,7 +53,7 @@ returncode=0
 # ENVIRONMENT CHECKS
 # --------------------------------------------------------------------------------
 
-DIR=$(dirname "$0")
+DIR=$(/usr/bin/dirname "$0")
 # shellcheck source=_common-framework.sh
 source "$DIR/_common-framework.sh"
 
@@ -62,16 +62,10 @@ if [[ ! -d "${this_script_dir}" ]]; then
     exit 1
 fi
 
-if [[ ! -f "$jamf_cli_path" ]]; then
-    jamf_cli_path=$(which jamf-cli)
-fi
-if [[ ! -f "$jamf_cli_path" ]]; then
-    echo "ERROR: jamf-cli not found. Please ensure jamf-cli is installed and in your PATH."
-    exit 1
-fi
+resolve_jamf_cli || exit 1
 
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "ERROR: python3 not found in PATH."
+if [[ ! -x /usr/bin/python3 ]]; then
+    echo "ERROR: /usr/bin/python3 not found (install the Xcode Command Line Tools)."
     exit 1
 fi
 
@@ -80,7 +74,7 @@ fi
 # --------------------------------------------------------------------------------
 
 usage() {
-    cat <<'USAGE'
+    /bin/cat <<'USAGE'
 Report Jamf Pro blueprint / DDM status across the Macs in a group, on one or
 more Jamf Pro instances.
 
@@ -93,8 +87,8 @@ Report options:
 --include-all-declarations     - Include non-blueprint declarations in the
                                  per-declaration report (ignored if
                                  --blueprint-id is set)
---output-dir DIR               - Per-instance CSVs written here (default:
-                                 $HOME/Library/Logs/JAMF/blueprint-status)
+-o | --output-dir DIR          - Per-instance CSVs written here (prompts
+                                 /tmp or ~/Desktop if omitted; /tmp with -x)
 --stale-days N                 - Days without contact before we call a device
                                  "stale" in the Likely Cause hint (default 3)
 
@@ -125,26 +119,6 @@ Examples:
 USAGE
 }
 
-# run jamf-cli for the current instance ($jss_url + token already set)
-jc() {
-    "$jamf_cli_path" "$@" --url "$jss_url" --token-file "$token_file_for_jamfcli"
-}
-
-# obtain a bearer token for the current $jss_instance and stage it for jc().
-# sets jss_url + token_file_for_jamfcli. Returns 1 if a token can't be obtained.
-token_for_instance() {
-    jss_instance="$1"
-    if [[ "$chosen_id" ]]; then
-        set_credentials "$jss_instance" "$chosen_id"
-    else
-        set_credentials "$jss_instance"
-    fi
-    jss_url="$jss_instance"
-    check_token || return 1
-    token_file_for_jamfcli=$(mktemp /tmp/jamfcli_token.XXXXXX)
-    echo "$token" > "$token_file_for_jamfcli"
-}
-
 # section header
 section() {
     echo
@@ -157,7 +131,7 @@ section() {
 url_host() {
     local u="${1#*://}"
     u="${u%%/*}"; u="${u%%:*}"
-    printf '%s' "${u}" | tr 'A-Z' 'a-z'
+    printf '%s' "${u}" | /usr/bin/tr 'A-Z' 'a-z'
 }
 
 # y/N confirm honouring --yes. $1 = prompt. Returns 0 for yes.
@@ -171,7 +145,7 @@ confirm() {
 # Build the default per-instance CSV path for this run.
 default_output_path() {
     local host="$1" mode="$2" stamp
-    stamp=$(date +%Y%m%d-%H%M%S)
+    stamp=$(/bin/date +%Y%m%d-%H%M%S)
     echo "${output_dir}/${host}-${stamp}-${mode}.csv"
 }
 
@@ -179,7 +153,7 @@ default_output_path() {
 # PYTHON HELPERS (dropped into $workdir per run)
 # --------------------------------------------------------------------------------
 write_python_helpers() {
-    cat > "${workdir}/aggregate.py" << 'PYEOF'
+    /bin/cat > "${workdir}/aggregate.py" << 'PYEOF'
 """
 Per-declaration flatten (default mode). One row per declaration across devices.
 
@@ -327,7 +301,7 @@ summary = {
 print(json.dumps(summary))
 PYEOF
 
-    cat > "${workdir}/pivot.py" << 'PYEOF'
+    /bin/cat > "${workdir}/pivot.py" << 'PYEOF'
 """
 Per-device pivot for ONE blueprint. Two modes:
 
@@ -571,7 +545,7 @@ summary = {
 print(json.dumps(summary))
 PYEOF
 
-    cat > "${workdir}/blueprint_menu.py" << 'PYEOF'
+    /bin/cat > "${workdir}/blueprint_menu.py" << 'PYEOF'
 """
 Emit "count<TAB>blueprintId" lines mined from the DDM status JSON in status_dir,
 sorted most-deployed first.
@@ -621,111 +595,6 @@ PYEOF
 # INSTANCE PROCESSING
 # --------------------------------------------------------------------------------
 
-# Interactively pick a computer group on the current instance. Sets $group_name.
-# Called only in interactive mode when --group wasn't supplied on the CLI.
-pick_group_from_instance() {
-    local groups_json="${inst_workdir}/groups.json"
-    echo "  [pick_group_from_instance] listing computer groups on ${jss_instance}..."
-    if ! jc pro classic-computer-groups list \
-        --output json > "${groups_json}" 2>"${inst_workdir}/groups-stderr.log"; then
-        :
-    fi
-    if [[ ! -s "${groups_json}" ]]; then
-        echo "  [pick_group_from_instance] ERROR: could not list computer groups."
-        [[ -s "${inst_workdir}/groups-stderr.log" ]] && sed 's/^/    /' "${inst_workdir}/groups-stderr.log"
-        return 1
-    fi
-
-    # Emit "id<TAB>type<TAB>name" lines, name-sorted, TSV-safe.
-    local menu_file="${inst_workdir}/group-menu.tsv"
-    python3 -c "
-import json, sys
-raw = json.load(open(sys.argv[1]))
-items = raw.get('computer_groups') if isinstance(raw, dict) else raw
-if not isinstance(items, list):
-    items = raw.get('results') if isinstance(raw, dict) else []
-    if not isinstance(items, list):
-        items = []
-def clean(s):
-    return str(s).replace('\t', ' ').replace('\n', ' ').replace('\r', ' ')
-rows = []
-for g in items:
-    if not isinstance(g, dict):
-        continue
-    gid = g.get('id')
-    name = g.get('name') or ''
-    is_smart = g.get('is_smart')
-    gtype = 'smart' if is_smart is True else ('static' if is_smart is False else '?')
-    if gid is None or not name:
-        continue
-    rows.append((clean(str(gid)), gtype, clean(name)))
-rows.sort(key=lambda r: r[2].lower())
-for r in rows:
-    print('\t'.join(r))
-" "${groups_json}" > "${menu_file}" 2>/dev/null
-
-    local total; total=$(grep -c . "${menu_file}" 2>/dev/null || true); total=${total:-0}
-    if [[ "${total}" -eq 0 ]]; then
-        echo "  [pick_group_from_instance] ERROR: no computer groups found on ${jss_instance}."
-        return 1
-    fi
-
-    local -a ids=() types=() names=()
-    local gid gtype name
-    while IFS=$'\t' read -r gid gtype name; do
-        [[ -z "${name}" ]] && continue
-        ids+=("${gid}")
-        types+=("${gtype}")
-        names+=("${name}")
-    done < "${menu_file}"
-
-    echo
-    echo "  Select a computer group (${total} on ${jss_instance}):"
-    echo "  Type part of a name to filter, or press Enter to list all."
-    echo
-
-    local filter
-    read -r -p "  Filter (optional): " filter
-    echo
-
-    local -a fids=() ftypes=() fnames=()
-    local i lower_filter
-    lower_filter=$(printf '%s' "${filter}" | tr '[:upper:]' '[:lower:]')
-    for i in "${!names[@]}"; do
-        local lower_name
-        lower_name=$(printf '%s' "${names[$i]}" | tr '[:upper:]' '[:lower:]')
-        if [[ -z "${lower_filter}" ]] || [[ "${lower_name}" == *"${lower_filter}"* ]]; then
-            fids+=("${ids[$i]}")
-            ftypes+=("${types[$i]}")
-            fnames+=("${names[$i]}")
-        fi
-    done
-
-    local n="${#fnames[@]}"
-    if (( n == 0 )); then
-        echo "  No group name matches \"${filter}\"."
-        return 1
-    fi
-
-    for i in "${!fnames[@]}"; do
-        printf "     [%d] %-6s %s\n" "$((i + 1))" "${ftypes[$i]}" "${fnames[$i]}"
-    done
-    echo
-
-    local choice
-    while true; do
-        read -r -p "     Choose by number: " choice
-        choice="$(printf '%s' "${choice}" | tr -d '[:space:]')"
-        if [[ "${choice}" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= n )); then
-            group_name="${fnames[$((choice - 1))]}"
-            echo "     Selected: ${group_name}"
-            echo
-            return 0
-        fi
-        echo "     Not a valid option."
-    done
-}
-
 fetch_group_members() {
     local group_json="${inst_workdir}/group.json"
     echo "  [fetch_group_members] resolving group \"${group_name}\"..."
@@ -735,11 +604,11 @@ fetch_group_members() {
     fi
     if [[ ! -s "${group_json}" ]]; then
         echo "  [fetch_group_members] ERROR: could not fetch group \"${group_name}\"."
-        [[ -s "${inst_workdir}/group-stderr.log" ]] && sed 's/^/    /' "${inst_workdir}/group-stderr.log"
+        [[ -s "${inst_workdir}/group-stderr.log" ]] && /usr/bin/sed 's/^/    /' "${inst_workdir}/group-stderr.log"
         return 1
     fi
 
-    python3 -c "
+    /usr/bin/python3 -c "
 import json, sys
 raw = json.load(open(sys.argv[1]))
 grp = raw.get('computer_group', raw) if isinstance(raw, dict) else raw
@@ -751,7 +620,7 @@ for c in comps:
         print(c['id'])
 " "${group_json}" > "${members_file}" 2>/dev/null
 
-    local count; count=$(grep -c . "${members_file}" 2>/dev/null || true); count=${count:-0}
+    local count; count=$(/usr/bin/grep -c . "${members_file}" 2>/dev/null || true); count=${count:-0}
     if [[ "${count}" -eq 0 ]]; then
         echo "  [fetch_group_members] ERROR: group resolved but has no member computers."
         return 1
@@ -768,11 +637,11 @@ fetch_inventory() {
     fi
     if [[ ! -s "${inventory_json}" ]]; then
         echo "  [fetch_inventory] ERROR: could not retrieve computer inventory."
-        [[ -s "${inst_workdir}/inv-stderr.log" ]] && sed 's/^/    /' "${inst_workdir}/inv-stderr.log"
+        [[ -s "${inst_workdir}/inv-stderr.log" ]] && /usr/bin/sed 's/^/    /' "${inst_workdir}/inv-stderr.log"
         return 1
     fi
 
-    python3 -c "
+    /usr/bin/python3 -c "
 import json, sys
 inv = json.load(open(sys.argv[1]))
 members = {line.strip() for line in open(sys.argv[2]) if line.strip()}
@@ -817,7 +686,7 @@ for r in recs:
 sys.stdout.write('\n'.join(out) + ('\n' if out else ''))
 " "${inventory_json}" "${members_file}" > "${targets_file}" 2>/dev/null
 
-    local n; n=$(grep -c . "${targets_file}" 2>/dev/null || true); n=${n:-0}
+    local n; n=$(/usr/bin/grep -c . "${targets_file}" 2>/dev/null || true); n=${n:-0}
     if [[ "${n}" -eq 0 ]]; then
         echo "  [fetch_inventory] ERROR: none of the group members were found in computer inventory."
         return 1
@@ -826,7 +695,7 @@ sys.stdout.write('\n'.join(out) + ('\n' if out else ''))
 }
 
 fetch_statuses() {
-    local total; total=$(grep -c . "${targets_file}" 2>/dev/null || true); total=${total:-0}
+    local total; total=$(/usr/bin/grep -c . "${targets_file}" 2>/dev/null || true); total=${total:-0}
     echo "  [fetch_statuses] pulling DDM status per device (${total} device(s))..."
     local n=0 mgmt name ddm compId lastContact osver role
     while IFS=$'\t' read -r mgmt name ddm compId lastContact osver role; do
@@ -848,7 +717,7 @@ fetch_statuses() {
 pick_blueprint_from_statuses() {
     # Interactive picker; sets $blueprint_id (or leaves empty -> full report).
     local menu_file="${inst_workdir}/blueprint-menu.tsv"
-    python3 "${workdir}/blueprint_menu.py" "${status_dir}" > "${menu_file}" 2>/dev/null
+    /usr/bin/python3 "${workdir}/blueprint_menu.py" "${status_dir}" > "${menu_file}" 2>/dev/null
 
     local -a ids=() cnts=()
     if [[ -s "${menu_file}" ]]; then
@@ -885,7 +754,7 @@ pick_blueprint_from_statuses() {
     local choice
     while true; do
         read -r -p "     Choose by number: " choice
-        choice="$(printf '%s' "${choice}" | tr -d '[:space:]')"
+        choice="$(printf '%s' "${choice}" | /usr/bin/tr -d '[:space:]')"
 
         if ! [[ "${choice}" =~ ^[0-9]+$ ]]; then
             echo "     Please enter a number."
@@ -898,7 +767,7 @@ pick_blueprint_from_statuses() {
             break
         elif (( choice == manual_opt )); then
             read -r -p "     Blueprint ID: " blueprint_id
-            blueprint_id="$(printf '%s' "${blueprint_id}" | tr -d '[:space:]')"
+            blueprint_id="$(printf '%s' "${blueprint_id}" | /usr/bin/tr -d '[:space:]')"
             [[ -z "${blueprint_id}" ]] && { echo "     (empty - falling back to full report)"; blueprint_id=""; }
             break
         elif (( choice == full_opt )); then
@@ -916,11 +785,11 @@ pick_blueprint_from_statuses() {
 fetch_command_history() {
     # Pivot mode only: fetch classic-computer-history for the suspect devices.
     local suspects
-    suspects=$(python3 "${workdir}/pivot.py" \
+    suspects=$(/usr/bin/python3 "${workdir}/pivot.py" \
         "${targets_file}" "${status_dir}" "${cmdhist_dir}" "" \
         "${blueprint_id}" "suspects" "${stale_days}" 2>/dev/null)
 
-    local total; total=$(printf '%s\n' "${suspects}" | grep -c . 2>/dev/null || true); total=${total:-0}
+    local total; total=$(printf '%s\n' "${suspects}" | /usr/bin/grep -c . 2>/dev/null || true); total=${total:-0}
     if [[ "${total}" -eq 0 ]]; then
         echo "  [fetch_command_history] all devices have the blueprint deployed - skipping."
         return
@@ -944,27 +813,27 @@ aggregate_and_report() {
 
     local summary_json
     if [[ -n "${blueprint_id}" ]]; then
-        summary_json=$(python3 "${workdir}/pivot.py" \
+        summary_json=$(/usr/bin/python3 "${workdir}/pivot.py" \
             "${targets_file}" "${status_dir}" "${cmdhist_dir}" \
             "${out_arg}" "${blueprint_id}" "report" "${stale_days}" \
             2>"${inst_workdir}/aggregate-stderr.log")
     else
         local mode_arg="blueprint"
         [[ $include_all -eq 1 ]] && mode_arg="all"
-        summary_json=$(python3 "${workdir}/aggregate.py" \
+        summary_json=$(/usr/bin/python3 "${workdir}/aggregate.py" \
             "${targets_file}" "${status_dir}" "${out_arg}" "${mode_arg}" \
             2>"${inst_workdir}/aggregate-stderr.log")
     fi
 
     if [[ -z "${summary_json}" ]]; then
         echo "  [aggregate_and_report] ERROR: aggregator returned no summary."
-        [[ -s "${inst_workdir}/aggregate-stderr.log" ]] && sed 's/^/    /' "${inst_workdir}/aggregate-stderr.log"
+        [[ -s "${inst_workdir}/aggregate-stderr.log" ]] && /usr/bin/sed 's/^/    /' "${inst_workdir}/aggregate-stderr.log"
         return 1
     fi
 
     echo
     if [[ -n "${blueprint_id}" ]]; then
-        python3 -c "
+        /usr/bin/python3 -c "
 import json, sys
 s = json.loads(sys.argv[1])
 print(f'  Blueprint:              {s[\"blueprint_id\"]}')
@@ -980,7 +849,7 @@ else:
         print(f'    {status:20s} {count}')
 " "${summary_json}"
     else
-        python3 -c "
+        /usr/bin/python3 -c "
 import json, sys
 s = json.loads(sys.argv[1])
 print(f'  Devices in group:       {s[\"devices_total\"]}')
@@ -1012,13 +881,13 @@ process_instance() {
     local host; host=$(url_host "${jss_instance}")
 
     inst_workdir="${workdir}/${host}"
-    mkdir -p "${inst_workdir}"
+    /bin/mkdir -p "${inst_workdir}"
     inventory_json="${inst_workdir}/inventory.json"
     members_file="${inst_workdir}/members.txt"
     targets_file="${inst_workdir}/targets.tsv"
     status_dir="${inst_workdir}/status"
     cmdhist_dir="${inst_workdir}/cmdhist"
-    mkdir -p "${status_dir}" "${cmdhist_dir}"
+    /bin/mkdir -p "${status_dir}" "${cmdhist_dir}"
 
     # Reset per-instance mode state; the picker sets these when interactive.
     if [[ ${interactive_pick} -eq 1 ]]; then
@@ -1027,7 +896,7 @@ process_instance() {
         # If --group wasn't supplied on the CLI, ask the user to pick one on
         # this instance (groups differ per tenant, so pick per-instance).
         if [[ -z "${group_name}" ]]; then
-            pick_group_from_instance || { returncode=1; return; }
+            choose_computer_group || { returncode=1; return; }
         fi
     fi
 
@@ -1059,7 +928,7 @@ while [[ "$#" -gt 0 ]]; do
         --group)                    shift; group_name="$1" ;;
         --blueprint-id)             shift; blueprint_id="$1" ;;
         --include-all-declarations) include_all=1 ;;
-        --output-dir)               shift; output_dir="$1" ;;
+        -o|--output-dir)            shift; output_dir="$1" ;;
         --stale-days)               shift; stale_days="$1" ;;
         -il|--instance-list)        shift; chosen_instance_list_file="$1" ;;
         -i|--instance)              shift; chosen_instances+=("$1") ;;
@@ -1081,20 +950,13 @@ if [[ -n "${blueprint_id}" || $assume_yes -eq 1 || $no_interaction -eq 1 || ! -t
     interactive_pick=0
 fi
 
-# Default output directory
-if [[ -z "${output_dir}" ]]; then
-    output_dir="${HOME}/Library/Logs/JAMF/blueprint-status"
-fi
 if [[ $dry_run -eq 0 ]]; then
-    mkdir -p "${output_dir}" 2>/dev/null || {
-        echo "ERROR: could not create output directory: ${output_dir}"
-        exit 1
-    }
+    choose_output_dir || exit 1
 fi
 
 # temp working directory for per-run scratch files
-workdir=$(mktemp -d /tmp/report-macos-blueprint-status-XXXXXX)
-trap 'rm -f "${token_file_for_jamfcli:-}"; rm -rf "${workdir}"' EXIT
+workdir=$(/usr/bin/mktemp -d /tmp/report-macos-blueprint-status-XXXXXX)
+trap 'remove_jamfcli_token; /bin/rm -rf "${workdir}"' EXIT
 
 write_python_helpers
 
@@ -1111,7 +973,7 @@ fi
 # select the instances that will be reported on
 choose_destination_instances
 
-# require --group in non-interactive mode; otherwise pick_group_from_instance
+# require --group in non-interactive mode; otherwise choose_computer_group
 # will fire per-instance after the token is minted (groups are per-tenant).
 if [[ -z "${group_name}" && ${interactive_pick} -eq 0 ]]; then
     echo "ERROR: --group NAME is required in non-interactive mode."
@@ -1128,8 +990,7 @@ for instance in "${instance_choice_array[@]}"; do
         continue
     fi
     process_instance
-    rm -f "${token_file_for_jamfcli}"
-    token_file_for_jamfcli=""
+    remove_jamfcli_token
 done
 
 echo
