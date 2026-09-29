@@ -1,23 +1,28 @@
 #!/bin/bash
 
-# Report whether specific apps are installed on target computers.
-# Apps and target devices are specified at runtime — no hardcoded lists.
+# Report whether specific apps are installed on target macOS computers or
+# iOS / iPadOS devices. Platform, apps and targets are chosen at runtime —
+# no hardcoded lists.
+#
+# Platform (menu if omitted):
+#   --macos | --ios
 #
 # Target selection (pick one):
 #   --serial S1 S2 ...       Explicit serial numbers
-#   --name N1 N2 ...         Exact computer names
+#   --name N1 N2 ...         Exact computer / device names
 #   --name-match PATTERN     Case-insensitive partial name match (fetches all inventory)
-#   --group GROUP_NAME       Smart or static computer group
+#   --group GROUP_NAME       Smart or static computer / mobile device group
 #
 # Apps:
-#   --app PATTERN            Substring to match (may be repeated for multiple apps)
+#   --app PATTERN            Substring of app name or bundle ID (may be repeated)
 #                            (interactive prompt if omitted)
 #
 # Usage:
-#   ./report-app-installs.sh [-il LIST] [-i URL] \
+#   ./report-app-installs.sh [-il LIST] [-i URL] [--macos|--ios] \
 #       --app "musescore" --app "sibelius" --app "logic pro" \
 #       --group "NOR Music Labs"
 
+# set to mac or ios by choose_device_platform
 instance_list_type="mac"
 
 # -------------------------------------------------------------------------
@@ -53,18 +58,21 @@ while [[ "$#" -gt 0 ]]; do
         -j|--jamf-cli)        shift; jamf_cli_path="$1" ;;
         -o|--output-dir)      shift; output_dir="$1" ;;
         --app)                shift; app_patterns+=("$(to_lower "$1")") ;;
+        --macos|--mac|--ios|--ipados|--mobile) parse_platform_arg "$1" ;;
         --serial|--name|--name-match|--group)
             parse_target_arg "$@" || exit 1
             shift "$target_args_used"
             continue
             ;;
         -h|--help)
-            echo "Usage: $0 [MJT flags] --app PATTERN [--app PATTERN ...] [target flags]"
+            echo "Usage: $0 [MJT flags] [--macos|--ios] --app PATTERN [--app PATTERN ...] [target flags]"
+            echo ""
+            print_platform_usage
             echo ""
             print_target_usage
             echo ""
             echo "Apps:"
-            echo "  --app PATTERN            Substring match (repeat for multiple apps)"
+            echo "  --app PATTERN            Substring of app name or bundle ID (repeat for multiple apps)"
             echo "                           (interactive prompt if omitted)"
             echo ""
             echo "Output:"
@@ -86,6 +94,8 @@ while [[ "$#" -gt 0 ]]; do
     shift
 done
 
+choose_device_platform || exit 1
+
 # Prompt for apps if none supplied
 if [[ ${#app_patterns[@]} -eq 0 ]]; then
     echo "Enter app names to check (one per line, blank line to finish):"
@@ -101,7 +111,7 @@ if [[ ${#app_patterns[@]} -eq 0 ]]; then
     exit 1
 fi
 
-require_computer_target || exit 1
+require_device_target || exit 1
 
 # -------------------------------------------------------------------------
 # INSTANCE SELECTION
@@ -125,11 +135,13 @@ select_target_serials || exit 1
 timestamp=$(/bin/date '+%Y%m%d-%H%M%S')
 instance_short=$(url_host "$jss_instance")
 choose_output_dir || exit 1
-csv_file="${output_dir}/report-app-installs_${instance_short}_${timestamp}.csv"
+csv_file="${output_dir}/report-app-installs_$(platform_slug)_${instance_short}_${timestamp}.csv"
 
-# Header: Serial, Computer Name, Username, one column per app
+# Header: Serial, Computer/Device Name, Username, one column per app
+name_col="Computer Name"
+is_mobile_platform && name_col="Device Name"
 {
-    printf 'Serial,Computer Name,Username'
+    printf 'Serial,%s,Username' "$name_col"
     for p in "${app_patterns[@]}"; do
         printf ',"%s"' "${p//\"/\"\"}"
     done
@@ -141,15 +153,15 @@ csv_file="${output_dir}/report-app-installs_${instance_short}_${timestamp}.csv"
 # -------------------------------------------------------------------------
 
 echo ""
-echo "Querying ${#resolved_serials[@]} computer(s) on $jss_instance..."
+echo "Querying ${#resolved_serials[@]} $(device_noun)(s) on $jss_instance..."
 echo ""
 
 for serial in "${resolved_serials[@]}"; do
     printf "  %-14s ... " "$serial"
 
-    inv_json=$(fetch_computer_by_serial "$serial" GENERAL APPLICATIONS USER_AND_LOCATION)
+    raw_json=$(fetch_device_by_serial "$serial" GENERAL APPLICATIONS USER_AND_LOCATION)
 
-    if [[ -z "$inv_json" ]]; then
+    if [[ -z "$raw_json" ]]; then
         echo "NOT FOUND in Jamf"
         printf '%s,NOT FOUND,' "$serial" >> "$csv_file"
         for p in "${app_patterns[@]}"; do
@@ -159,6 +171,7 @@ for serial in "${resolved_serials[@]}"; do
         continue
     fi
 
+    inv_json=$(printf '%s' "$raw_json" | normalise_device_json)
     patterns=$(printf '%s\n' "${app_patterns[@]}")
     row=$(printf '%s' "$inv_json" | J_PATTERNS="$patterns" J_SERIAL="$serial" /usr/bin/python3 -c '
 import csv, io, json, os, sys
@@ -170,20 +183,12 @@ try:
 except Exception:
     sys.exit(1)
 
-if isinstance(data, dict) and isinstance(data.get("results"), list):
-    data = data["results"][0] if data["results"] else {}
-if isinstance(data, list):
-    data = data[0] if data else {}
-if not isinstance(data, dict):
-    sys.exit(1)
+# normalise_device_json shape: name, username, apps[{name, id, version}]
+name     = data.get("name") or ""
+username = data.get("username") or ""
+app_keys = [(a.get("name", "") + "\n" + a.get("id", "")).lower() for a in data.get("apps") or []]
 
-name     = (data.get("general") or {}).get("name") or ""
-ul       = data.get("userAndLocation") or {}
-username = (ul.get("username") or ul.get("realname") or "").strip()
-apps     = data.get("applications") or []
-app_names_lower = [str(a.get("name") or "").lower() for a in apps if isinstance(a, dict)]
-
-results = ["Installed" if any(p in n for n in app_names_lower) else "Not Installed" for p in patterns]
+results = ["Installed" if any(p in k for k in app_keys) else "Not Installed" for p in patterns]
 
 # Line 1: console summary. Line 2: finished CSV row.
 print("%s (%s, user: %s)" % (" | ".join(results), name, username or "unknown"))
