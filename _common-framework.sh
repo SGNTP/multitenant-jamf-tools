@@ -1321,7 +1321,8 @@ choose_computer_group() {
 }
 
 # Ask how to select target devices (per $device_platform). Sets $target_mode
-# (serial | name | name-match | group) plus $target_values (array) or $group_name.
+# (serial | name | name-match | group | all) plus $target_values (array) or
+# $group_name.
 choose_device_targets() {
     local input item noun="computer" title="Computer"
     if is_mobile_platform; then
@@ -1329,12 +1330,13 @@ choose_device_targets() {
     fi
     choose_from_menu "" "Select target ${noun}s by:" \
         "Serial number(s)" "${title} name(s)" "Partial ${noun} name" \
-        "${title} group (smart or static)" || return 1
+        "${title} group (smart or static)" "All ${noun}s" || return 1
     case "$menu_choice" in
         1) target_mode="serial" ;;
         2) target_mode="name" ;;
         3) target_mode="name-match" ;;
         4) target_mode="group" ;;
+        5) target_mode="all" ;;
     esac
     case "$target_mode" in
         serial|name)
@@ -1429,6 +1431,20 @@ for r in recs if isinstance(recs, list) else []:
                 [[ -n "$serial" ]] && resolved_serials+=("$serial")
             done <<< "$out"
             ;;
+        all)
+            echo "   Fetching inventory to list every ${noun}..."
+            out=$(fetch_inventory_list GENERAL HARDWARE | normalise_device_list \
+                | /usr/bin/python3 -c '
+import json, sys
+for line in sys.stdin:
+    s = json.loads(line).get("serial")
+    if s:
+        print(s)
+' 2>/dev/null)
+            while IFS= read -r serial; do
+                [[ -n "$serial" ]] && resolved_serials+=("$serial")
+            done <<< "$out"
+            ;;
         group)
             echo "   Resolving members of group \"${group_name}\"..."
             out=$(jc pro "${group_cmd[@]}" --name "$group_name" \
@@ -1507,24 +1523,34 @@ fetch_device_by_serial() {
 
 # Read computer or mobile device inventory JSON on stdin and print one
 # normalised JSON object, so reports can treat both platforms alike:
-#   {"name", "username", "last_seen", "last_seen_display", "days_since",
-#    "os_version", "model", "apps": [{"name", "id", "version"}]}
+#   {"serial", "device_id", "name", "username", "last_seen",
+#    "last_seen_display", "days_since", "os_version", "model",
+#    "apps": [{"name", "id", "version"}]}
 # last_seen is last check-in for computers, last inventory update for mobile;
 # last_seen_display is "YYYY-MM-DD HH:MM" (or "Never"), days_since whole days.
 # Prints nothing if the input isn't a device record.
 normalise_device_json() {
+    _normalise_devices first
+}
+
+# As normalise_device_json, but for a whole inventory list (a "results" array,
+# e.g. from fetch_inventory_list): prints one normalised object per line.
+normalise_device_list() {
+    _normalise_devices all
+}
+
+_normalise_devices() {
     /usr/bin/python3 -c '
 import datetime, json, re, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
-if isinstance(d, dict) and isinstance(d.get("results"), list):
-    d = d["results"][0] if d["results"] else {}
-if isinstance(d, list):
-    d = d[0] if d else {}
-if not isinstance(d, dict) or not d:
-    sys.exit(0)
+recs = d.get("results") if isinstance(d, dict) and isinstance(d.get("results"), list) else d
+if not isinstance(recs, list):
+    recs = [recs]
+if sys.argv[1] == "first":
+    recs = recs[:1]
 
 def first(*vals):
     for v in vals:
@@ -1532,52 +1558,74 @@ def first(*vals):
             return str(v).strip()
     return ""
 
-g   = d.get("general") or {}
-hw  = d.get("hardware") or {}
-ul  = d.get("userAndLocation") or d.get("location") or {}
-ios = d.get("ios") or {}
-os_block = d.get("operatingSystem") or {}
+now = datetime.datetime.now(datetime.timezone.utc)
 
-apps_raw = d.get("applications") or ios.get("applications") or []
-apps = []
-for a in apps_raw:
-    if not isinstance(a, dict):
-        continue
-    apps.append({
-        "name": first(a.get("name")),
-        "id": first(a.get("bundleId"), a.get("identifier")),
-        # mobile: shortVersion is the marketing version, version the build
-        "version": first(a.get("shortVersion"), a.get("version")),
-    })
+def normalise(d):
+    g   = d.get("general") or {}
+    hw  = d.get("hardware") or {}
+    ul  = d.get("userAndLocation") or d.get("location") or {}
+    ios = d.get("ios") or {}
+    os_block = d.get("operatingSystem") or {}
 
-last = first(g.get("lastContactTime"), g.get("lastContact"), g.get("lastCheckIn"),
-             g.get("lastInventoryUpdateDate"), d.get("lastInventoryUpdateTimestamp"),
-             d.get("lastInventoryUpdateDate"))
-last_display, days = ("Never", "")
-if last:
-    last_display = last
-    iso = last.replace("Z", "+00:00")
-    iso = re.sub(r"\.(\d+)", lambda m: "." + m.group(1)[:6].ljust(6, "0"), iso)
-    try:
-        dt = datetime.datetime.fromisoformat(iso)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=datetime.timezone.utc)
-        last_display = dt.strftime("%Y-%m-%d %H:%M")
-        days = str((datetime.datetime.now(datetime.timezone.utc) - dt).days)
-    except Exception:
-        pass
+    apps = []
+    for a in d.get("applications") or ios.get("applications") or []:
+        if not isinstance(a, dict):
+            continue
+        apps.append({
+            "name": first(a.get("name")),
+            "id": first(a.get("bundleId"), a.get("identifier")),
+            # mobile: shortVersion is the marketing version, version the build
+            "version": first(a.get("shortVersion"), a.get("version")),
+        })
 
-print(json.dumps({
-    "name": first(g.get("name"), g.get("displayName"), d.get("name")),
-    "username": first(ul.get("username"), ul.get("realname"), ul.get("realName")),
-    "last_seen": last,
-    "last_seen_display": last_display,
-    "days_since": days,
-    "os_version": first(os_block.get("version"), g.get("osVersion"), d.get("osVersion")),
-    "model": first(hw.get("model"), ios.get("model"), d.get("model")),
-    "apps": apps,
-}))
-' 2>/dev/null
+    last = first(g.get("lastContactTime"), g.get("lastContact"), g.get("lastCheckIn"),
+                 g.get("lastInventoryUpdateDate"), d.get("lastInventoryUpdateTimestamp"),
+                 d.get("lastInventoryUpdateDate"))
+    last_display, days = ("Never", "")
+    if last:
+        last_display = last
+        iso = last.replace("Z", "+00:00")
+        iso = re.sub(r"\.(\d+)", lambda m: "." + m.group(1)[:6].ljust(6, "0"), iso)
+        try:
+            dt = datetime.datetime.fromisoformat(iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            last_display = dt.strftime("%Y-%m-%d %H:%M")
+            days = str((now - dt).days)
+        except Exception:
+            pass
+
+    return {
+        "serial": first(hw.get("serialNumber"), d.get("serialNumber")),
+        "device_id": first(d.get("mobileDeviceId"), d.get("id")),
+        "name": first(g.get("name"), g.get("displayName"), d.get("name")),
+        "username": first(ul.get("username"), ul.get("realname"), ul.get("realName")),
+        "last_seen": last,
+        "last_seen_display": last_display,
+        "days_since": days,
+        "os_version": first(os_block.get("version"), g.get("osVersion"), d.get("osVersion")),
+        "model": first(hw.get("model"), ios.get("model"), d.get("model")),
+        "apps": apps,
+    }
+
+for r in recs:
+    if isinstance(r, dict) and r:
+        print(json.dumps(normalise(r)))
+' "$1" 2>/dev/null
+}
+
+# fetch_inventory_list SECTION...
+# Print the whole computer or mobile device inventory (per $device_platform)
+# as one JSON document. Can be slow on large fleets.
+fetch_inventory_list() {
+    local section cmd="computer-inventory"
+    local -a section_args=()
+    is_mobile_platform && cmd="mobile-devices"
+    for section in "$@"; do
+        section_args+=(--section "$section")
+    done
+    jc pro "$cmd" list "${section_args[@]}" \
+        --output json --no-hints --no-update-check --quiet 2>/dev/null
 }
 
 # --------------------------------------------------------------------------------
@@ -1680,10 +1728,11 @@ choose_single_instance() {
     fi
 }
 
-# Handle one --serial / --name / --name-match / --group flag at the start of "$@".
+# Handle one --serial / --name / --name-match / --group / --all-devices flag at
+# the start of "$@".
 # Sets $target_mode plus $target_values or $group_name, and $target_args_used to
 # the number of arguments consumed. Usage in an arg loop:
-#   --serial|--name|--name-match|--group)
+#   --serial|--name|--name-match|--group|--all-devices)
 #       parse_target_arg "$@" || exit 1; shift "$target_args_used"; continue ;;
 parse_target_arg() {
     local flag="$1" mode
@@ -1691,16 +1740,18 @@ parse_target_arg() {
         --serial|--name) mode="${flag#--}" ;;
         --name-match)    mode="name-match" ;;
         --group)         mode="group" ;;
+        --all-devices)   mode="all" ;;
         *) return 1 ;;
     esac
     if [[ -n "$target_mode" && "$target_mode" != "$mode" ]]; then
-        echo "ERROR: only one of --serial, --name, --name-match, --group may be used at a time."
+        echo "ERROR: only one of --serial, --name, --name-match, --group, --all-devices may be used at a time."
         return 1
     fi
     target_mode="$mode"
     shift
     target_args_used=1
     case "$mode" in
+        all) ;;
         serial|name)
             while [[ "$#" -gt 0 && "$1" != -* ]]; do
                 target_values+=("$1"); shift
@@ -1728,12 +1779,13 @@ print_target_usage() {
     echo "  --name N1 N2 ...         Exact computer / device names"
     echo "  --name-match PATTERN     Partial name match"
     echo "  --group GROUP_NAME       Computer or mobile device group (smart or static)"
+    echo "  --all-devices            Every computer / mobile device on the instance"
 }
 
 # Fail early when no target flag was given and nobody can answer the menu.
 require_device_target() {
     if [[ -z "$target_mode" && ( "${no_interaction:-0}" -eq 1 || ! -t 0 ) ]]; then
-        echo "ERROR: specify a target via --serial, --name, --name-match, or --group."
+        echo "ERROR: specify a target via --serial, --name, --name-match, --group or --all-devices."
         return 1
     fi
 }
