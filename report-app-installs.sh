@@ -98,7 +98,8 @@ choose_device_platform || exit 1
 
 # Prompt for apps if none supplied
 if [[ ${#app_patterns[@]} -eq 0 ]]; then
-    echo "Enter app names to check (one per line, blank line to finish):"
+    echo "Enter apps to check: part of the app name or bundle ID, case-insensitive"
+    echo "(one per line, blank line to finish), e.g. \"sibelius\" or \"com.avid.sibelius\":"
     while true; do
         read -r -p '  App pattern: ' p
         [[ -z "$p" ]] && break
