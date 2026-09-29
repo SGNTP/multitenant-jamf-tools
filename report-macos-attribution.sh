@@ -39,7 +39,7 @@ enrolled_from=""
 enrolled_to=""
 date_basis="enrollment"    # enrollment | initial-entry
 do_history=1
-out_dir=""
+output_dir=""
 probe=0
 dry_run=0
 assume_yes=0
@@ -52,7 +52,7 @@ returncode=0
 # ENVIRONMENT CHECKS
 # --------------------------------------------------------------------------------
 
-DIR=$(dirname "$0")
+DIR=$(/usr/bin/dirname "$0")
 source "$DIR/_common-framework.sh"
 
 if [[ ! -d "${this_script_dir}" ]]; then
@@ -70,7 +70,7 @@ fi
 # --------------------------------------------------------------------------------
 
 usage() {
-    cat <<'USAGE'
+    /bin/cat <<'USAGE'
 
 report-macos-attribution.sh - macOS device attribution report
 
@@ -91,7 +91,8 @@ History:
   --no-history            Skip history (faster; User History sheet will be empty)
 
 Output:
-  --out DIR               Directory for output files (default: /tmp/mjt/)
+  -o | --output-dir DIR   Directory for output files (prompts /tmp or ~/Desktop
+                          if omitted; /tmp with -x). --out is an alias.
 
 Instances:
   -il | --instance-list FILENAME
@@ -114,7 +115,7 @@ USAGE
 instance_slug() {
     local u="${1#*://}"
     u="${u%%/*}"; u="${u%%:*}"
-    printf '%s' "${u}" | tr 'A-Z' 'a-z' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//'
+    printf '%s' "${u}" | /usr/bin/tr 'A-Z' 'a-z' | /usr/bin/tr -cs 'a-z0-9' '-' | /usr/bin/sed 's/^-//;s/-$//'
 }
 
 section() {
@@ -159,7 +160,7 @@ run_probe() {
     echo
     echo "  Raw response (one device, all sections):"
     echo
-    python3 -c "
+    /usr/bin/python3 -c "
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -175,7 +176,7 @@ except Exception as e:
     echo
     echo "  Classic API UserLocation for device id above:"
     local dev_id
-    dev_id=$(python3 -c "
+    dev_id=$(/usr/bin/python3 -c "
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -188,7 +189,7 @@ except: print('')
         curl_url="${jss_url}/JSSResource/computerhistory/id/${dev_id}/subset/UserLocation"
         curl_args=("--request" "GET" "--header" "Accept: application/json")
         send_curl_request
-        python3 -c "
+        /usr/bin/python3 -c "
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -226,7 +227,7 @@ fetch_inventory() {
     send_curl_request
 
     local total_count
-    total_count=$(python3 -c "
+    total_count=$(/usr/bin/python3 -c "
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -237,7 +238,7 @@ try:
 except Exception as e:
     print(0, file=__import__('sys').stderr)
 " "$curl_output_file" >> "$jsonl_file" 2>"$workdir/tc.txt")
-    total_count=$(cat "$workdir/tc.txt" 2>/dev/null || echo 0)
+    total_count=$(/bin/cat "$workdir/tc.txt" 2>/dev/null || echo 0)
     echo "  Total devices in instance: ${total_count}"
 
     local fetched=200
@@ -248,7 +249,7 @@ except Exception as e:
         send_curl_request
 
         local count_this
-        count_this=$(python3 -c "
+        count_this=$(/usr/bin/python3 -c "
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -258,7 +259,7 @@ try:
     print(len(results), file=__import__('sys').stderr)
 except: print(0, file=__import__('sys').stderr)
 " "$curl_output_file" >> "$jsonl_file" 2>"$workdir/ct.txt")
-        count_this=$(cat "$workdir/ct.txt" 2>/dev/null || echo 0)
+        count_this=$(/bin/cat "$workdir/ct.txt" 2>/dev/null || echo 0)
         fetched=$(( fetched + count_this ))
         page=$(( page + 1 ))
         printf '\r  Fetched %d / %d...' "$fetched" "$total_count"
@@ -266,7 +267,7 @@ except: print(0, file=__import__('sys').stderr)
     printf '\r  Fetched %d devices.          \n' "$total_count"
 
     # Consolidate JSONL -> JSON array
-    python3 -c "
+    /usr/bin/python3 -c "
 import sys, json
 records = []
 with open(sys.argv[1]) as f:
@@ -287,7 +288,7 @@ fetch_history() {
     local hist_file="$workdir/history.json"
     local matched_ids_file="$1"
     local total
-    total=$(wc -l < "$matched_ids_file" | tr -d ' ')
+    total=$(/usr/bin/wc -l < "$matched_ids_file" | /usr/bin/tr -d ' ')
 
     echo "  Fetching user-location history for ${total} matched device(s)..."
 
@@ -303,7 +304,7 @@ fetch_history() {
         send_curl_request
 
         local entries
-        entries=$(python3 -c "
+        entries=$(/usr/bin/python3 -c "
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -324,7 +325,7 @@ except Exception as e:
         fi
         printf '\r  History: %d / %d...' "$n" "$total"
         # gentle rate limit
-        [[ $(( n % 10 )) -eq 0 ]] && sleep 0.2
+        [[ $(( n % 10 )) -eq 0 ]] && /bin/sleep 0.2
     done < "$matched_ids_file"
     echo "}" >> "$hist_tmp"
     mv "$hist_tmp" "$hist_file"
@@ -333,7 +334,7 @@ except Exception as e:
 
 # Write the Python scorer/reporter script to $workdir/score.py
 write_scorer() {
-    cat > "$workdir/score.py" << 'PYEOF'
+    /bin/cat > "$workdir/score.py" << 'PYEOF'
 """
 macOS Attribution Report scorer and Excel/CSV writer.
 
@@ -898,7 +899,7 @@ run_scorer() {
     # Get matched device IDs for history fetch
     local ids_file="$workdir/matched_ids.txt"
     local filter_json
-    filter_json=$(python3 -c "
+    filter_json=$(/usr/bin/python3 -c "
 import json, sys
 print(json.dumps({
     'model_filter':  sys.argv[1],
@@ -913,10 +914,10 @@ print(json.dumps({
 }))
 " "$filter_model" "$filter_chip" "$enrolled_from" "$enrolled_to" \
   "$date_basis" "$jss_instance" "${USER:-unknown}" \
-  "$(date '+%Y-%m-%d %H:%M')" 2>/dev/null)
+  "$(/bin/date '+%Y-%m-%d %H:%M')" 2>/dev/null)
 
     # Extract matched IDs (for history fetch)
-    python3 -c "
+    /usr/bin/python3 -c "
 import json, sys, re
 from datetime import datetime, timezone
 
@@ -967,7 +968,7 @@ for rec in inv:
 " "$inv_file" "$filter_json" > "$ids_file" 2>/dev/null
 
     local matched_count
-    matched_count=$(wc -l < "$ids_file" | tr -d ' ')
+    matched_count=$(/usr/bin/wc -l < "$ids_file" | /usr/bin/tr -d ' ')
     echo "  Devices matching filters: ${matched_count}"
 
     if [[ $matched_count -eq 0 ]]; then
@@ -984,8 +985,8 @@ for rec in inv:
 
     # Output paths
     local ts
-    ts=$(date '+%Y-%m-%d-%H%M')
-    local base="${out_dir}/macOS-Attribution-${inst_slug}-${ts}"
+    ts=$(/bin/date '+%Y-%m-%d-%H%M')
+    local base="${output_dir}/macOS-Attribution-${inst_slug}-${ts}"
     local xlsx_path="${base}.xlsx"
     local csv_path="${base}_devices.csv"
 
@@ -996,7 +997,7 @@ for rec in inv:
         return
     fi
 
-    python3 "$workdir/score.py" \
+    /usr/bin/python3 "$workdir/score.py" \
         "$inv_file" \
         "$workdir/history.json" \
         "$xlsx_path" \
@@ -1061,7 +1062,7 @@ while [[ "$#" -gt 0 ]]; do
         --date-basis)        shift; date_basis="$1" ;;
         --history)           do_history=1 ;;
         --no-history)        do_history=0 ;;
-        --out)               shift; out_dir="$1" ;;
+        -o|--output-dir|--out) shift; output_dir="$1" ;;
         --probe)             probe=1 ;;
         -il|--instance-list) shift; chosen_instance_list_file="$1" ;;
         -i|--instance)       shift; chosen_instances+=("$1") ;;
@@ -1077,15 +1078,9 @@ while [[ "$#" -gt 0 ]]; do
     shift
 done
 
-# Default output dir
-if [[ -z "$out_dir" ]]; then
-    out_dir="${output_location:-/tmp/mjt}"
-fi
-mkdir -p "$out_dir"
-
 # Working directory
-workdir=$(mktemp -d /tmp/report-macos-attribution-XXXXXX)
-trap 'rm -rf "${workdir}"' EXIT
+workdir=$(/usr/bin/mktemp -d /tmp/report-macos-attribution-XXXXXX)
+trap '/bin/rm -rf "${workdir}"' EXIT
 
 echo
 echo "macOS Attribution Report"
@@ -1099,6 +1094,9 @@ fi
 
 choose_destination_instances
 collect_filters
+if [[ $dry_run -eq 0 && $probe -eq 0 ]]; then
+    choose_output_dir || exit 1
+fi
 write_scorer
 
 for instance in "${instance_choice_array[@]}"; do
@@ -1113,7 +1111,7 @@ for instance in "${instance_choice_array[@]}"; do
 done
 
 echo
-echo "Output directory: ${out_dir}"
+[[ -n "$output_dir" ]] && echo "Output directory: ${output_dir}"
 echo "Finished"
 echo
 exit "${returncode:-0}"

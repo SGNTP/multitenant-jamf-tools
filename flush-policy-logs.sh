@@ -18,7 +18,7 @@
 # per-instance token, the same pattern set-prestage-os-version.sh uses. The flush call
 # itself is a Classic API DELETE made with that same token.
 #
-# Output (in /tmp):
+# Output (in /tmp or ~/Desktop - chosen at run time, or -o DIR):
 #   report : policy-logflush-report.xlsx (URLs hyperlinked) / .csv fallback
 #   flush  : policy-logflush-result.xlsx / .csv fallback
 #
@@ -39,12 +39,13 @@ policy_name=""
 policy_keyword=""
 policy_category=""
 dry_run=0
+output_dir=""
 
 # --------------------------------------------------------------------------------
 # ENVIRONMENT CHECKS
 # --------------------------------------------------------------------------------
 
-DIR=$(dirname "$0")
+DIR=$(/usr/bin/dirname "$0")
 source "$DIR/_common-framework.sh"
 
 if [[ ! -d "${this_script_dir}" ]]; then
@@ -52,13 +53,7 @@ if [[ ! -d "${this_script_dir}" ]]; then
     exit 1
 fi
 
-if [[ ! -f "$jamf_cli_path" ]]; then
-    jamf_cli_path=$(which jamf-cli)
-fi
-if [[ ! -f "$jamf_cli_path" ]]; then
-    echo "ERROR: jamf-cli not found. Please ensure jamf-cli is installed and in your PATH."
-    exit 1
-fi
+resolve_jamf_cli || exit 1
 
 # --------------------------------------------------------------------------------
 # FUNCTIONS
@@ -97,6 +92,7 @@ Instances:
 
 Other:
 -n  | --dry-run                    - (flush mode) preview what would be flushed; write nothing
+-o  | --output-dir DIR             - where to save the report (prompts /tmp or ~/Desktop if omitted)
 -x  | --nointeraction              - run without interaction
 -v                                 - verbose jamf-cli output
 -h  | --help                       - this help
@@ -113,28 +109,9 @@ Examples:
 USAGE
 }
 
-# run jamf-cli for the current instance ($jss_url + token already set)
-jc() {
-    "$jamf_cli_path" "$@" --url "$jss_url" --token-file "$token_file_for_jamfcli"
-}
-
 # human label for an interval enum value (spaces instead of +)
 label_for_interval() {
     printf '%s' "${1//+/ }"
-}
-
-# obtain a bearer token for the current $jss_instance (sets jss_url + token_file_for_jamfcli)
-# returns 1 if a token could not be obtained
-token_for_instance() {
-    if [[ "$chosen_id" ]]; then
-        set_credentials "$jss_instance" "$chosen_id"
-    else
-        set_credentials "$jss_instance"
-    fi
-    jss_url="${jss_instance}"
-    check_token || return 1
-    token_file_for_jamfcli=$(mktemp /tmp/jamfcli_token.XXXXXX)
-    echo "$token" > "$token_file_for_jamfcli"
 }
 
 # emit "id <TAB> name" for every policy matching the chosen scope on the current instance.
@@ -151,7 +128,7 @@ policies_for_instance() {
 
     if [[ -n "$policy_category" ]]; then
         # Classic API: GET /JSSResource/policies/category/{category} (token already set)
-        curl -s \
+        /usr/bin/curl -s \
             -H "Authorization: Bearer $token" \
             -H "Accept: application/json" \
             "${jss_url%/}/JSSResource/policies/category/$(encode_name "$policy_category")" \
@@ -175,7 +152,7 @@ policies_for_instance() {
 # flush one policy id on the current instance; logs one CSV row + a console line
 flush_policy() {
     local pid="$1" pname="$2" status
-    status=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+    status=$(/usr/bin/curl -s -o /dev/null -w "%{http_code}" -X DELETE \
         -H "Authorization: Bearer $token" \
         "${jss_url%/}/JSSResource/logflush/policy/id/${pid}/interval/${interval}")
     if [[ "$status" == "200" || "$status" == "201" ]]; then
@@ -276,40 +253,6 @@ interactive_menu() {
     menu_choose_run_mode
 }
 
-# convert the CSV to a formatted xlsx (hyperlinked URL col) if openpyxl is present.
-# $1 = sheet title, $2 = 1-based column number holding a URL (0 = none)
-csv_to_xlsx() {
-    local title="$1" url_col="$2"
-    command -v python3 >/dev/null 2>&1 || return 1
-    python3 -c "import openpyxl" >/dev/null 2>&1 || return 1
-    python3 - "$output_csv" "$output_xlsx" "$title" "$url_col" <<'PY'
-import csv, sys
-from openpyxl import Workbook
-from openpyxl.styles import Font
-csv_path, xlsx_path, title, url_col = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
-wb = Workbook(); ws = wb.active; ws.title = title[:31]
-link_font = Font(color="0563C1", underline="single")
-header_font = Font(bold=True)
-with open(csv_path, newline="") as f:
-    rows = list(csv.reader(f))
-for r_idx, row in enumerate(rows, start=1):
-    ws.append(row)
-    if r_idx == 1:
-        for c_idx in range(1, len(row) + 1):
-            ws.cell(row=1, column=c_idx).font = header_font
-        continue
-    if url_col and len(row) >= url_col and str(row[url_col - 1]).startswith("http"):
-        cell = ws.cell(row=r_idx, column=url_col)
-        cell.hyperlink = row[url_col - 1]
-        cell.font = link_font
-widths = [40, 40, 8, 16, 66]
-for i, w in enumerate(widths, start=1):
-    ws.column_dimensions[chr(64 + i)].width = w
-ws.freeze_panes = "A2"
-wb.save(xlsx_path)
-PY
-}
-
 # --------------------------------------------------------------------------------
 # MAIN
 # --------------------------------------------------------------------------------
@@ -329,6 +272,7 @@ while [[ "$#" -gt 0 ]]; do
         -a|-ai|--all|--all-instances) all_instances=1 ;;
         --id|--client-id|--user|--username) shift; chosen_id="$1" ;;
         -n|--dry-run)      dry_run=1 ;;
+        -o|--output-dir)   shift; output_dir="$1" ;;
         -x|--nointeraction) no_interaction=1 ;;
         -v|--verbose)      verbose=1 ;;
         -h|--help)         usage; exit 0 ;;
@@ -376,10 +320,13 @@ fi
 # select the instances to operate on
 choose_destination_instances
 
+choose_output_dir || exit 1
+trap remove_jamfcli_token EXIT
+
 # ================================ REPORT MODE ===================================
 if [[ "$mode" == "report" ]]; then
-    output_csv="/tmp/policy-logflush-report.csv"
-    output_xlsx="/tmp/policy-logflush-report.xlsx"
+    output_csv="${output_dir}/policy-logflush-report.csv"
+    output_xlsx="${output_dir}/policy-logflush-report.xlsx"
     echo "Instance,Policy,ID,Interval,URL" > "$output_csv"
 
     echo "Scope: $scope_desc"
@@ -402,7 +349,7 @@ if [[ "$mode" == "report" ]]; then
             r_ids+=("$pid"); r_names+=("$pname"); r_links+=("$local_url")
         done < <(policies_for_instance)
 
-        rm -f "$token_file_for_jamfcli"
+        remove_jamfcli_token
 
         if [[ ${#r_ids[@]} -eq 0 ]]; then
             echo "   (no policies match)"
@@ -418,17 +365,13 @@ if [[ "$mode" == "report" ]]; then
         echo
         printf "   %-6s  %-*s  %s\n" "ID" "$nw" "Policy" "Link"
         printf "   %-6s  %-*s  %s\n" "------" "$nw" \
-            "$(printf '%.0s-' $(seq 1 "$nw"))" "------------------------------"
+            "$(printf '%.0s-' $(/usr/bin/seq 1 "$nw"))" "------------------------------"
         for i2 in "${!r_names[@]}"; do
             printf "   %-6s  %-*.*s  %s\n" "${r_ids[$i2]}" "$nw" "$nw" "${r_names[$i2]}" "${r_links[$i2]}"
         done
     done
 
-    final_output="$output_csv"
-    if csv_to_xlsx "Policy Log Flush" 5; then
-        rm -f "$output_csv"
-        final_output="$output_xlsx"
-    fi
+    final_output=$(csv_to_xlsx "$output_csv" "$output_xlsx" "Policy Log Flush" 5)
 
     echo
     echo "Found $match_count matching policy(ies)."
@@ -440,8 +383,8 @@ if [[ "$mode" == "report" ]]; then
 fi
 
 # ================================= FLUSH MODE ===================================
-output_csv="/tmp/policy-logflush-result.csv"
-output_xlsx="/tmp/policy-logflush-result.xlsx"
+output_csv="${output_dir}/policy-logflush-result.csv"
+output_xlsx="${output_dir}/policy-logflush-result.xlsx"
 echo "Instance,Policy,ID,Interval,Result" > "$output_csv"
 
 echo "Mode: flush"
@@ -468,7 +411,7 @@ for instance in "${instance_choice_array[@]}"; do
 
     if [[ ${#ids[@]} -eq 0 ]]; then
         echo "   [$jss_instance] no policies match."
-        rm -f "$token_file_for_jamfcli"
+        remove_jamfcli_token
         continue
     fi
 
@@ -484,14 +427,10 @@ for instance in "${instance_choice_array[@]}"; do
         fi
     done
 
-    rm -f "$token_file_for_jamfcli"
+    remove_jamfcli_token
 done
 
-final_output="$output_csv"
-if csv_to_xlsx "Policy Log Flush" 0; then
-    rm -f "$output_csv"
-    final_output="$output_xlsx"
-fi
+final_output=$(csv_to_xlsx "$output_csv" "$output_xlsx" "Policy Log Flush" 0)
 
 echo
 if [[ $dry_run -eq 1 ]]; then

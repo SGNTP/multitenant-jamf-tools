@@ -61,6 +61,7 @@ assume_yes=0
 skip_reenrol=0              # -> skip steps 9-10 entirely
 
 REENROL_RECIPE="Recipes-ScriptBasedPolicy-DJmobi/JamfBinaryReenrol-Ongoing-DJmobi.jamf.recipe.yaml"
+recipe_repo_dir="${MSP_RECIPES_PATH:-/Users/Shared/msp-internal-recipes}"   # -> --recipe-repo
 
 workdir=""
 returncode=0
@@ -69,30 +70,15 @@ returncode=0
 # ENVIRONMENT CHECKS
 # --------------------------------------------------------------------------------
 
-# source the _common-framework.sh file
-# TIP for Visual Studio Code - Add Custom Arg '-x' to the Shellcheck extension settings
-mjt_repo_dir=$(/usr/bin/mdfind -literal "kMDItemDisplayName == 'multitenant-jamf-tools'" 2>/dev/null | /usr/bin/head -n 1)
-if [[ ! -d "$mjt_repo_dir" ]]; then
-    echo "ERROR: multitenant-jamf-tools not found"
-    exit 1
-fi
-source "$mjt_repo_dir/_common-framework.sh"
+DIR=$(/usr/bin/dirname "$0")
+source "$DIR/_common-framework.sh"
 
-# locate the msp-internal-recipes repo (required for steps 9-10). Fixed path first; prompt if not found.
-mit_repo_dir=$(/usr/bin/mdfind -literal "kMDItemDisplayName == 'msp-internal-recipes'" 2>/dev/null | /usr/bin/head -n 1)
-if [[ ! -d "$mit_repo_dir" ]]; then
-    echo "ERROR: msp-internal-recipes not found"
+if [[ ! -d "${this_script_dir}" ]]; then
+    echo "ERROR: path to repo ambiguous. Aborting."
     exit 1
 fi
 
-# Locate jamf-cli (required). If not found, try the PATH. If still not found, exit.
-if [[ ! -f "$jamf_cli_path" ]]; then
-    jamf_cli_path=$(command -v jamf-cli)
-fi
-if [[ ! -f "$jamf_cli_path" ]]; then
-    echo "ERROR: jamf-cli not found. Please ensure jamf-cli is installed and in your PATH."
-    exit 1
-fi
+resolve_jamf_cli || exit 1
 
 # --------------------------------------------------------------------------------
 # FUNCTIONS
@@ -116,6 +102,8 @@ Steps 9-10 (AutoPkg re-enrol policy):
 --invitation-id ID                 - Enrolment Invitation code (skips the 7-8 create)
 --exclusions-done                  - Confirm step 3 done; required to run 9-10 under --yes
 --skip-reenrol                     - Skip steps 9-10 entirely (settings/invitation only)
+--recipe-repo DIR                  - msp-internal-recipes checkout (default: $MSP_RECIPES_PATH,
+                                     else /Users/Shared/msp-internal-recipes)
 
 Instances:
 -il | --instance-list FILENAME     - instance-list filename (without .txt)
@@ -140,26 +128,6 @@ Examples:
 # Full unattended run once step 3 exclusions are confirmed
 ./configure-macos-laps.sh -i https://tenant.jamfcloud.com --yes --exclusions-done
 USAGE
-}
-
-# run jamf-cli for the current instance ($jss_url + token already set)
-jc() {
-    "$jamf_cli_path" "$@" --url "$jss_url" --token-file "$token_file_for_jamfcli"
-}
-
-# obtain a bearer token for the current $jss_instance and stage it for jc().
-# sets jss_url + token_file_for_jamfcli. Returns 1 if a token can't be obtained.
-token_for_instance() {
-    jss_instance="$1"
-    if [[ "$chosen_id" ]]; then
-        set_credentials "$jss_instance" "$chosen_id"
-    else
-        set_credentials "$jss_instance"
-    fi
-    jss_url="$jss_instance"
-    check_token || return 1
-    token_file_for_jamfcli=$(/usr/bin/mktemp /tmp/jamfcli_token.XXXXXX)
-    echo "$token" > "$token_file_for_jamfcli"
 }
 
 # Convert "86400" / "1d" / "12h" / "30m" to seconds. Echoes seconds, returns 1 on bad input.
@@ -227,7 +195,7 @@ detect_prestage_admins() {
     local json
     json=$(jc pro computer-prestages list --output json 2>/dev/null)
     [[ -z "${json}" ]] && return 0
-    printf '%s' "${json}" | /usr/local/autopkg/python -c '
+    printf '%s' "${json}" | /usr/bin/python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -334,7 +302,7 @@ apply_uie() {
     fi
 
     local tsv cur_cma cur_mu cur_hide
-    tsv=$(printf '%s' "${enr}" | /usr/local/autopkg/python -c '
+    tsv=$(printf '%s' "${enr}" | /usr/bin/python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 if isinstance(d, dict) and isinstance(d.get("results"), dict):
@@ -357,7 +325,7 @@ print("|".join([b(d.get("createManagementAccount")), (mu if isinstance(mu, str) 
     echo
 
     local new_enr
-    new_enr=$(printf '%s' "${enr}" | J_MU="${uie_username}" /usr/local/autopkg/python -c '
+    new_enr=$(printf '%s' "${enr}" | J_MU="${uie_username}" /usr/bin/python3 -c '
 import json, sys, os
 d = json.load(sys.stdin)
 if isinstance(d, dict) and isinstance(d.get("results"), dict):
@@ -405,7 +373,7 @@ apply_laps_rotation() {
     fi
 
     local tsv cur_deploy cur_rotate cur_expiry cur_rotview
-    tsv=$(printf '%s' "${cur}" | /usr/local/autopkg/python -c '
+    tsv=$(printf '%s' "${cur}" | /usr/bin/python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 if isinstance(d, dict) and isinstance(d.get("results"), dict):
@@ -444,7 +412,7 @@ print("|".join([b(d.get("autoDeployEnabled")), b(d.get("autoRotateEnabled")),
     rotate_after_view="${final_rotview}"
 
     local new_laps
-    new_laps=$(J_AD="${final_deploy}" J_AR="${final_rotate}" J_EXP="${final_expiry}" J_RV="${final_rotview}" /usr/local/autopkg/python -c '
+    new_laps=$(J_AD="${final_deploy}" J_AR="${final_rotate}" J_EXP="${final_expiry}" J_RV="${final_rotview}" /usr/bin/python3 -c '
 import os, json
 def tob(s): return s == "true"
 print(json.dumps({
@@ -495,7 +463,7 @@ guided_script_exclusions() {
     fi
 
     local ids_file="${workdir}/scripts.tsv"
-    printf '%s' "${list_json}" | /usr/local/autopkg/python -c '
+    printf '%s' "${list_json}" | /usr/bin/python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 items = d.get("results", d) if isinstance(d, dict) else d
@@ -546,7 +514,7 @@ for it in items:
     local skip_ids; skip_ids=$(/usr/bin/cut -f1 "${match_file}" | /usr/bin/paste -sd, -)
 
     jc pro classic-policies list --output json 2>"${workdir}/pol-list.log" \
-      | /usr/local/autopkg/python -c '
+      | /usr/bin/python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -581,7 +549,7 @@ for it in items:
         [[ -z "${pid}" ]] && continue
         pn=$(( pn + 1 ))
         jc pro classic-policies get "${pid}" --output json 2>/dev/null \
-          | J_SKIP="${skip_ids}" J_USER="${uie_username}" J_HASUSER="${user_script_ids}" /usr/local/autopkg/python -c '
+          | J_SKIP="${skip_ids}" J_USER="${uie_username}" J_HASUSER="${user_script_ids}" /usr/bin/python3 -c '
 import json, sys, os
 try:
     d = json.load(sys.stdin)
@@ -642,7 +610,7 @@ for s in scripts:
     fi
 
     # Render affected policies as a numbered list; entries.tsv drives browser-open.
-    J_ENTRIES="${workdir}/entries.tsv" J_USER="${uie_username}" /usr/local/autopkg/python -c '
+    J_ENTRIES="${workdir}/entries.tsv" J_USER="${uie_username}" /usr/bin/python3 -c '
 import sys, os
 from collections import OrderedDict
 ep   = os.environ["J_ENTRIES"]
@@ -740,7 +708,7 @@ inv_code_by_id() {
 
 # Newest (highest id) USER_INITIATED_EMAIL invitation id, via the list endpoint.
 newest_email_invitation_id() {
-    jc pro classic-computer-invitations list --output json 2>/dev/null | /usr/local/autopkg/python -c '
+    jc pro classic-computer-invitations list --output json 2>/dev/null | /usr/bin/python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -763,15 +731,15 @@ print(best if best >= 0 else "")
 
 # Generate a strong random alphanumeric password (no XML-special chars).
 random_password() {
-    /usr/local/autopkg/python -c 'import secrets, string; a = string.ascii_letters + string.digits; print("".join(secrets.choice(a) for _ in range(32)))' 2>/dev/null \
-        || LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | /usr/bin/head -c 32
+    /usr/bin/python3 -c 'import secrets, string; a = string.ascii_letters + string.digits; print("".join(secrets.choice(a) for _ in range(32)))' 2>/dev/null \
+        || LC_ALL=C /usr/bin/tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | /usr/bin/head -c 32
 }
 
 # Emit the XML body for the computer invitation (multi-use, ~10-year, creates +
 # hides the managed admin named ${uie_username}). $1 = ssh_password to embed.
 invitation_xml() {
     local ssh_pw="${1}" exp_date
-    exp_date=$(/usr/local/autopkg/python -c 'import datetime; print((datetime.datetime.now()+datetime.timedelta(days=3650)).strftime("%Y-%m-%d %H:%M:%S"))' 2>/dev/null)
+    exp_date=$(/usr/bin/python3 -c 'import datetime; print((datetime.datetime.now()+datetime.timedelta(days=3650)).strftime("%Y-%m-%d %H:%M:%S"))' 2>/dev/null)
     [[ -z "${exp_date}" ]] && exp_date="2035-01-01 00:00:00"
     cat <<XML
 <computer_invitation>
@@ -798,7 +766,7 @@ create_invitation_via_api() {
     ssh_pw=$(random_password)
     resp_json=$(invitation_xml "${ssh_pw}" | jc pro classic-computer-invitations create --output json 2>"${workdir}/inv-create.log")
 
-    iid=$(printf '%s' "${resp_json}" | /usr/local/autopkg/python -c '
+    iid=$(printf '%s' "${resp_json}" | /usr/bin/python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -836,7 +804,7 @@ cleanup_old_invitations() {
     list_json=$(jc pro classic-computer-invitations list --output json 2>/dev/null)
     [[ -z "${list_json}" ]] && return 0
 
-    printf '%s' "${list_json}" | J_KEEP="${keep_id}" /usr/local/autopkg/python -c '
+    printf '%s' "${list_json}" | J_KEEP="${keep_id}" /usr/bin/python3 -c '
 import json, sys, os
 keep = os.environ.get("J_KEEP", "")
 try:
@@ -937,7 +905,7 @@ capture_invitation_via_api() {
     list_json=$(jc pro classic-computer-invitations list --output json 2>"${workdir}/inv-list.log")
     [[ -z "${list_json}" ]] && return 1
 
-    printf '%s' "${list_json}" | /usr/local/autopkg/python -c '
+    printf '%s' "${list_json}" | /usr/bin/python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -1083,16 +1051,17 @@ apply_reenrol_policy() {
         return
     fi
 
-    local recipe_path="${mit_repo_dir}/${REENROL_RECIPE}"
+    local recipe_path="${recipe_repo_dir}/${REENROL_RECIPE}"
     if [[ ! -f "${recipe_path}" ]]; then
         echo "  ERROR: Recipe not found at: ${recipe_path}"
+        echo "  Point --recipe-repo (or \$MSP_RECIPES_PATH) at your msp-internal-recipes checkout."
         echo
         returncode=1
         return
     fi
 
-    if ! command -v autopkg >/dev/null 2>&1; then
-        echo "  ERROR: autopkg not found in PATH."
+    if ! [[ -x /usr/local/bin/autopkg ]]; then
+        echo "  ERROR: autopkg not found at /usr/local/bin/autopkg."
         echo
         returncode=1
         return
@@ -1141,7 +1110,7 @@ apply_reenrol_policy() {
     autopkg_args+=(--key "EXCLUDED_2_COMPUTER_GROUP_NAME=${group_name}")
     autopkg_args+=(--key "JSS_URL=${this_jss_url}")
 
-    if autopkg run "${autopkg_args[@]}"; then
+    if /usr/local/bin/autopkg run "${autopkg_args[@]}"; then
         echo
         echo "  ${group_name} group and re-enrol policy created."
     else
@@ -1187,6 +1156,7 @@ while [[ "$#" -gt 0 ]]; do
         --invitation-id)    shift; invitation_id="$1" ;;
         --exclusions-done)  exclusions_done=1 ;;
         --skip-reenrol)     skip_reenrol=1 ;;
+        --recipe-repo)      shift; recipe_repo_dir="$1" ;;
         -il|--instance-list) shift; chosen_instance_list_file="$1" ;;
         -i|--instance)      shift; chosen_instances+=("$1") ;;
         -a|-ai|--all|--all-instances) all_instances=1 ;;
@@ -1204,7 +1174,7 @@ echo
 
 # temp working directory for per-instance API scratch files
 workdir=$(/usr/bin/mktemp -d /tmp/configure-macos-laps-XXXXXX)
-trap 'rm -f "${token_file_for_jamfcli:-}"; rm -rf "${workdir}"' EXIT
+trap 'remove_jamfcli_token; /bin/rm -rf "${workdir}"' EXIT
 
 # tenant mismatch check: --jss-url should target the same host as the chosen instance(s)
 if [[ -n "${jss_autopkg_url}" && ${#chosen_instances[@]} -eq 1 ]]; then
@@ -1242,8 +1212,7 @@ for instance in "${instance_choice_array[@]}"; do
         continue
     fi
     process_instance
-    rm -f "${token_file_for_jamfcli}"
-    token_file_for_jamfcli=""
+    remove_jamfcli_token
 done
 
 echo
