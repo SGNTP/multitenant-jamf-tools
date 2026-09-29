@@ -98,7 +98,9 @@ choose_device_platform || exit 1
 
 # Prompt for app if not supplied
 if [[ -z "$app_label" ]]; then
-    read -r -p 'App to report on (substring match, e.g. "google chrome"): ' app_label
+    echo "App to report on: part of the app name or bundle ID, case-insensitive"
+    echo '  e.g. "google chrome" or "com.google.Chrome"'
+    read -r -p '  App: ' app_label
 fi
 if [[ -z "$app_label" ]]; then
     echo "ERROR: an --app pattern is required."
@@ -138,7 +140,7 @@ if is_mobile_platform; then
 else
     name_col="Computer Name"; seen_col="Last Check-in"; seen_days_col="Days Since Check-in"
 fi
-printf 'Serial,%s,Username,"%s Version",%s,%s\n' \
+printf 'Serial,%s,Username,"%s Version",Matched App,%s,%s\n' \
     "$name_col" "$csv_label" "$seen_col" "$seen_days_col" > "$csv_file"
 
 # -------------------------------------------------------------------------
@@ -161,7 +163,7 @@ for serial in "${resolved_serials[@]}"; do
 
     if [[ -z "$raw_json" ]]; then
         echo "NOT FOUND in Jamf"
-        printf '%s,NOT FOUND,,,,\n' "$serial" >> "$csv_file"
+        printf '%s,NOT FOUND,,,,,\n' "$serial" >> "$csv_file"
         continue
     fi
 
@@ -182,12 +184,19 @@ name     = data.get("name") or ""
 username = data.get("username") or ""
 
 versions = []
+matched = []
 for a in data.get("apps") or []:
     if pattern in a.get("name", "").lower() or pattern in a.get("id", "").lower():
         v = a.get("version", "")
         if v and v not in versions:
             versions.append(v)
+        label = a.get("name", "")
+        if a.get("id"):
+            label = "%s (%s)" % (label, a["id"]) if label else a["id"]
+        if label and label not in matched:
+            matched.append(label)
 version = " / ".join(versions) if versions else "Not Installed"
+matched_apps = " / ".join(matched)
 
 last = data.get("last_seen") or ""
 last_fmt = ""
@@ -207,15 +216,16 @@ else:
     last_fmt = "Never"
 
 # Line 1: console summary. Line 2: finished CSV row.
-print("%s (%s, user: %s, last seen %s)" % (version, name, username or "unknown", last_fmt))
+shown = version + (" [%s]" % matched_apps if matched_apps else "")
+print("%s (%s, user: %s, last seen %s)" % (shown, name, username or "unknown", last_fmt))
 buf = io.StringIO()
-csv.writer(buf, lineterminator="").writerow([os.environ.get("J_SERIAL", ""), name, username, version, last_fmt, days])
+csv.writer(buf, lineterminator="").writerow([os.environ.get("J_SERIAL", ""), name, username, version, matched_apps, last_fmt, days])
 print(buf.getvalue())
 ' 2>/dev/null)
 
     if [[ -z "$row" ]]; then
         echo "PARSE ERROR"
-        printf '%s,PARSE ERROR,,,,\n' "$serial" >> "$csv_file"
+        printf '%s,PARSE ERROR,,,,,\n' "$serial" >> "$csv_file"
         continue
     fi
 
