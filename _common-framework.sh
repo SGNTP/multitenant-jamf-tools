@@ -1507,13 +1507,14 @@ fetch_device_by_serial() {
 
 # Read computer or mobile device inventory JSON on stdin and print one
 # normalised JSON object, so reports can treat both platforms alike:
-#   {"name", "username", "last_seen", "os_version", "model",
-#    "apps": [{"name", "id", "version"}]}
-# last_seen is last check-in for computers, last inventory update for mobile.
+#   {"name", "username", "last_seen", "last_seen_display", "days_since",
+#    "os_version", "model", "apps": [{"name", "id", "version"}]}
+# last_seen is last check-in for computers, last inventory update for mobile;
+# last_seen_display is "YYYY-MM-DD HH:MM" (or "Never"), days_since whole days.
 # Prints nothing if the input isn't a device record.
 normalise_device_json() {
     /usr/bin/python3 -c '
-import json, sys
+import datetime, json, re, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
@@ -1549,12 +1550,29 @@ for a in apps_raw:
         "version": first(a.get("shortVersion"), a.get("version")),
     })
 
+last = first(g.get("lastContactTime"), g.get("lastContact"), g.get("lastCheckIn"),
+             g.get("lastInventoryUpdateDate"), d.get("lastInventoryUpdateTimestamp"),
+             d.get("lastInventoryUpdateDate"))
+last_display, days = ("Never", "")
+if last:
+    last_display = last
+    iso = last.replace("Z", "+00:00")
+    iso = re.sub(r"\.(\d+)", lambda m: "." + m.group(1)[:6].ljust(6, "0"), iso)
+    try:
+        dt = datetime.datetime.fromisoformat(iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        last_display = dt.strftime("%Y-%m-%d %H:%M")
+        days = str((datetime.datetime.now(datetime.timezone.utc) - dt).days)
+    except Exception:
+        pass
+
 print(json.dumps({
     "name": first(g.get("name"), g.get("displayName"), d.get("name")),
     "username": first(ul.get("username"), ul.get("realname"), ul.get("realName")),
-    "last_seen": first(g.get("lastContactTime"), g.get("lastContact"), g.get("lastCheckIn"),
-                       g.get("lastInventoryUpdateDate"), d.get("lastInventoryUpdateTimestamp"),
-                       d.get("lastInventoryUpdateDate")),
+    "last_seen": last,
+    "last_seen_display": last_display,
+    "days_since": days,
     "os_version": first(os_block.get("version"), g.get("osVersion"), d.get("osVersion")),
     "model": first(hw.get("model"), ios.get("model"), d.get("model")),
     "apps": apps,

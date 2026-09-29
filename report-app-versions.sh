@@ -170,7 +170,7 @@ for serial in "${resolved_serials[@]}"; do
     inv_json=$(printf '%s' "$raw_json" | normalise_device_json)
 
     row=$( printf '%s' "$inv_json" | J_PATTERN="$app_pattern" J_SERIAL="$serial" /usr/bin/python3 -c '
-import csv, datetime, io, json, os, re, sys
+import csv, io, json, os, sys
 
 pattern = os.environ.get("J_PATTERN", "").lower()
 
@@ -198,22 +198,8 @@ for a in data.get("apps") or []:
 version = " / ".join(versions) if versions else "Not Installed"
 matched_apps = " / ".join(matched)
 
-last = data.get("last_seen") or ""
-last_fmt = ""
-days = ""
-if last:
-    iso = last.replace("Z", "+00:00")
-    iso = re.sub(r"\.(\d+)", lambda m: "." + m.group(1)[:6].ljust(6, "0"), iso)
-    try:
-        dt = datetime.datetime.fromisoformat(iso)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=datetime.timezone.utc)
-        last_fmt = dt.strftime("%Y-%m-%d %H:%M")
-        days = str((datetime.datetime.now(datetime.timezone.utc) - dt).days)
-    except Exception:
-        last_fmt = last
-else:
-    last_fmt = "Never"
+last_fmt = data.get("last_seen_display") or "Never"
+days     = data.get("days_since") or ""
 
 # Line 1: console summary. Line 2: finished CSV row.
 shown = version + (" [%s]" % matched_apps if matched_apps else "")
