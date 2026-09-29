@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Report whether specific apps are installed on target computers.
-# Apps and target devices are specified at runtime — no hardcoded lists.
+# Report the inventoried version(s) of any app across target computers.
+# App and target devices are specified at runtime — no hardcoded lists.
 #
 # Target selection (pick one):
 #   --serial S1 S2 ...       Explicit serial numbers
@@ -9,14 +9,10 @@
 #   --name-match PATTERN     Case-insensitive partial name match (fetches all inventory)
 #   --group GROUP_NAME       Smart or static computer group
 #
-# Apps:
-#   --app PATTERN            Substring to match (may be repeated for multiple apps)
-#                            (interactive prompt if omitted)
-#
 # Usage:
-#   ./report-app-installs.sh [-il LIST] [-i URL] \
-#       --app "musescore" --app "sibelius" --app "logic pro" \
-#       --group "NOR Music Labs"
+#   ./report-app-versions.sh [-il LIST] [-i URL] \
+#       --app "google chrome" \
+#       --group "All Managed"
 
 instance_list_type="mac"
 
@@ -40,7 +36,9 @@ target_serials=()
 target_names=()
 name_match_pattern=""
 group_name=""
-app_patterns=()
+app_pattern=""
+app_label=""
+debug=0
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
@@ -50,9 +48,11 @@ while [[ "$#" -gt 0 ]]; do
         --id|--client-id)     shift; chosen_id="$1" ;;
         -x|--nointeraction)   no_interaction=1 ;;
         -v|--verbose)         verbose=1 ;;
+        --debug)              debug=1 ;;
         --app)
             shift
-            app_patterns+=("${1,,}")   # store lowercase
+            app_pattern="${1,,}"   # lowercase
+            app_label="$1"
             ;;
         --serial)
             shift
@@ -71,7 +71,7 @@ while [[ "$#" -gt 0 ]]; do
         --name-match)  shift; name_match_pattern="$1" ;;
         --group)       shift; group_name="$1" ;;
         -h|--help)
-            echo "Usage: $0 [MJT flags] --app PATTERN [--app PATTERN ...] [target flags]"
+            echo "Usage: $0 [MJT flags] --app PATTERN [target flags]"
             echo ""
             echo "Target (pick one):"
             echo "  --serial S1 S2 ...       Explicit serial numbers"
@@ -79,8 +79,8 @@ while [[ "$#" -gt 0 ]]; do
             echo "  --name-match PATTERN     Partial name match"
             echo "  --group GROUP_NAME       Computer group (smart or static)"
             echo ""
-            echo "Apps:"
-            echo "  --app PATTERN            Substring match (repeat for multiple apps)"
+            echo "App:"
+            echo "  --app PATTERN            Substring to match against app names (case-insensitive)"
             echo "                           (interactive prompt if omitted)"
             echo ""
             echo "MJT flags:"
@@ -94,21 +94,13 @@ while [[ "$#" -gt 0 ]]; do
     shift
 done
 
-# Prompt for apps if none supplied
-if [[ ${#app_patterns[@]} -eq 0 ]]; then
-    echo "Enter app names to check (one per line, blank line to finish):"
-    while true; do
-        printf '  App pattern: '
-        read -r p
-        [[ -z "$p" ]] && break
-        app_patterns+=("${p,,}")
-    done
+# Prompt for app if not supplied
+if [[ -z "$app_pattern" ]]; then
+    printf 'App to report on (substring match, e.g. "google chrome"): '
+    read -r app_label
+    app_pattern="${app_label,,}"
 fi
-
-if [[ ${#app_patterns[@]} -eq 0 ]]; then
-    echo "ERROR: at least one --app pattern is required."
-    exit 1
-fi
+[[ -z "$app_label" ]] && app_label="$app_pattern"
 
 # Validate: exactly one target mode must be set
 target_mode_count=0
@@ -162,6 +154,7 @@ if [[ ${#target_serials[@]} -gt 0 ]]; then
     resolved_serials=("${target_serials[@]}")
 
 elif [[ ${#target_names[@]} -gt 0 ]]; then
+    # Look up serial for each exact name
     echo "Resolving serials for ${#target_names[@]} computer name(s)..."
     for cname in "${target_names[@]}"; do
         serial=$(jamf-cli pro computer-inventory get \
@@ -190,6 +183,7 @@ except Exception:
     done
 
 elif [[ -n "$name_match_pattern" ]]; then
+    # Fetch all inventory and filter by partial name
     echo "Fetching inventory to match names containing \"$name_match_pattern\"..."
     list_json=$(jamf-cli pro computers-inventory list \
         --all \
@@ -217,12 +211,13 @@ try:
             serial = (r.get('general') or {}).get('serialNumber') or ''
             if serial:
                 print(serial)
-except Exception:
-    pass
+except Exception as e:
+    import traceback; traceback.print_exc()
 " "$list_json" 2>/dev/null)
     echo "  Found ${#resolved_serials[@]} computer(s) matching \"$name_match_pattern\"."
 
 elif [[ -n "$group_name" ]]; then
+    # Resolve group membership via Classic API
     echo "Resolving members of group \"$group_name\"..."
     group_json=$(jamf-cli pro classic-computer-groups get \
         --name "$group_name" \
@@ -263,21 +258,15 @@ fi
 timestamp=$(/bin/date '+%Y%m%d-%H%M%S')
 instance_short="${jss_instance#*://}"
 instance_short="${instance_short%%/*}"
-csv_file="/tmp/report-app-installs_${instance_short}_${timestamp}.csv"
+csv_file="/tmp/report-app-versions_${instance_short}_${timestamp}.csv"
 
-# Header: Serial, Computer Name, Username, one column per app
-{
-    printf 'Serial,Computer Name,Username'
-    for p in "${app_patterns[@]}"; do
-        printf ',%s' "$p"
-    done
-    printf '\n'
-} > "$csv_file"
+printf 'Serial,Computer Name,Username,%s Version,Last Check-in,Days Since Check-in\n' "$app_label" > "$csv_file"
 
 # -------------------------------------------------------------------------
 # FETCH AND PARSE
 # -------------------------------------------------------------------------
 
+# Fetch full inventory for one serial. Returns JSON or empty string.
 fetch_inventory() {
     local serial="$1" upper out variant
     upper=$(printf '%s' "$serial" | /usr/bin/tr 'a-z' 'A-Z')
@@ -301,7 +290,7 @@ fetch_inventory() {
 }
 
 echo ""
-echo "Querying ${#resolved_serials[@]} computer(s) on $jss_instance..."
+echo "Querying ${#resolved_serials[@]} computer(s) on $jss_instance for \"$app_label\"..."
 echo ""
 
 for serial in "${resolved_serials[@]}"; do
@@ -311,25 +300,19 @@ for serial in "${resolved_serials[@]}"; do
 
     if [[ -z "$inv_json" ]]; then
         echo "NOT FOUND in Jamf"
-        printf '%s,NOT FOUND,' "$serial" >> "$csv_file"
-        for p in "${app_patterns[@]}"; do
-            printf ',NOT FOUND' >> "$csv_file"
-        done
-        printf '\n' >> "$csv_file"
+        printf '%s,NOT FOUND,,,\n' "$serial" >> "$csv_file"
         continue
     fi
 
-    # Build a JSON array of patterns and pass to Python in one call
-    patterns_json=$(printf '%s\n' "${app_patterns[@]}" | /usr/local/autopkg/python -c '
-import sys, json
-lines = [l.rstrip() for l in sys.stdin]
-print(json.dumps(lines))
-')
+    if [[ $debug -eq 1 ]]; then
+        printf '%s' "$inv_json" | /usr/bin/head -c 2000
+        echo
+    fi
 
-    row=$(printf '%s' "$inv_json" | PATTERNS="$patterns_json" /usr/local/autopkg/python -c '
-import sys, json, os
+    row=$( printf '%s' "$inv_json" | J_PATTERN="$app_pattern" /usr/local/autopkg/python -c '
+import sys, json, os, datetime, re
 
-patterns = json.loads(os.environ.get("PATTERNS", "[]"))
+pattern = os.environ.get("J_PATTERN", "").lower()
 
 try:
     data = json.load(sys.stdin)
@@ -343,17 +326,44 @@ if isinstance(data, list):
 if not isinstance(data, dict):
     sys.exit(1)
 
-general  = data.get("general") or {}
-name     = general.get("name") or ""
+general = data.get("general") or {}
+name    = general.get("name") or ""
+
 ul       = data.get("userAndLocation") or {}
 username = (ul.get("username") or ul.get("realname") or "").strip()
-apps     = data.get("applications") or []
-app_names_lower = [str(a.get("name") or "").lower() for a in apps if isinstance(a, dict)]
 
-results = []
-for p in patterns:
-    installed = any(p in n for n in app_names_lower)
-    results.append("Installed" if installed else "Not Installed")
+apps     = data.get("applications") or []
+versions = []
+for a in apps:
+    if not isinstance(a, dict):
+        continue
+    if pattern in str(a.get("name") or "").lower():
+        v = str(a.get("version") or "").strip()
+        if v and v not in versions:
+            versions.append(v)
+version = " / ".join(versions) if versions else "Not Installed"
+
+last = ""
+for key in ("lastContact", "lastCheckIn", "lastContactTime"):
+    v = general.get(key)
+    if v:
+        last = str(v)
+        break
+last_fmt = ""
+days = ""
+if last:
+    iso = last.replace("Z", "+00:00")
+    iso = re.sub(r"\.(\d+)", lambda m: "." + m.group(1)[:6].ljust(6, "0"), iso)
+    try:
+        dt = datetime.datetime.fromisoformat(iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        last_fmt = dt.strftime("%Y-%m-%d %H:%M")
+        days = str((datetime.datetime.now(datetime.timezone.utc) - dt).days)
+    except Exception:
+        last_fmt = last
+else:
+    last_fmt = "Never"
 
 def esc(s):
     s = str(s)
@@ -361,37 +371,19 @@ def esc(s):
         return "\"" + s.replace("\"", "\"\"") + "\""
     return s
 
-parts = [esc(name), esc(username)] + [esc(r) for r in results]
-print("\t".join(parts))
+print("\t".join([esc(name), esc(username), esc(version), esc(last_fmt), esc(days)]))
 ' 2>/dev/null)
 
     if [[ -z "$row" ]]; then
         echo "PARSE ERROR"
-        printf '%s,PARSE ERROR,' "$serial" >> "$csv_file"
-        for p in "${app_patterns[@]}"; do
-            printf ',' >> "$csv_file"
-        done
-        printf '\n' >> "$csv_file"
+        printf '%s,PARSE ERROR,,,,\n' "$serial" >> "$csv_file"
         continue
     fi
 
-    IFS=$'\t' read -r -a fields <<< "$row"
-    c_name="${fields[0]}"
-    c_user="${fields[1]}"
-    statuses=("${fields[@]:2}")
+    IFS=$'\t' read -r c_name c_user c_version c_last c_days <<< "$row"
 
-    summary=""
-    for s in "${statuses[@]}"; do
-        [[ -n "$summary" ]] && summary+=" | "
-        summary+="$s"
-    done
-    printf '%s (%s, user: %s)\n' "$summary" "$c_name" "${c_user:-unknown}"
-
-    printf '%s,%s,%s' "$serial" "$c_name" "$c_user" >> "$csv_file"
-    for s in "${statuses[@]}"; do
-        printf ',%s' "$s" >> "$csv_file"
-    done
-    printf '\n' >> "$csv_file"
+    printf '%s (%s, user: %s, last seen %s)\n' "$c_version" "$c_name" "${c_user:-unknown}" "$c_last"
+    printf '%s,%s,%s,%s,%s,%s\n' "$serial" "$c_name" "$c_user" "$c_version" "$c_last" "$c_days" >> "$csv_file"
 done
 
 echo ""
