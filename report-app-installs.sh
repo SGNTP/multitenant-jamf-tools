@@ -42,19 +42,6 @@ group_name=""
 app_patterns=()
 output_dir=""
 
-# Record a target mode, rejecting a second, different one.
-set_target_mode() {
-    if [[ -n "$target_mode" && "$target_mode" != "$1" ]]; then
-        echo "ERROR: only one of --serial, --name, --name-match, --group may be used at a time."
-        exit 1
-    fi
-    target_mode="$1"
-}
-
-to_lower() {
-    printf '%s' "$1" | /usr/bin/tr '[:upper:]' '[:lower:]'
-}
-
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
         -il|--instance-list)  shift; chosen_instance_list_file="$1" ;;
@@ -66,24 +53,15 @@ while [[ "$#" -gt 0 ]]; do
         -j|--jamf-cli)        shift; jamf_cli_path="$1" ;;
         -o|--output-dir)      shift; output_dir="$1" ;;
         --app)                shift; app_patterns+=("$(to_lower "$1")") ;;
-        --serial|--name)
-            set_target_mode "${1#--}"
-            shift
-            while [[ "$#" -gt 0 && "$1" != -* ]]; do
-                target_values+=("$1"); shift
-            done
+        --serial|--name|--name-match|--group)
+            parse_target_arg "$@" || exit 1
+            shift "$target_args_used"
             continue
             ;;
-        --name-match)  set_target_mode "name-match"; shift; target_values=("$1") ;;
-        --group)       set_target_mode "group"; shift; group_name="$1" ;;
         -h|--help)
             echo "Usage: $0 [MJT flags] --app PATTERN [--app PATTERN ...] [target flags]"
             echo ""
-            echo "Target (pick one; interactive menu if omitted):"
-            echo "  --serial S1 S2 ...       Explicit serial numbers"
-            echo "  --name N1 N2 ...         Exact computer names"
-            echo "  --name-match PATTERN     Partial name match"
-            echo "  --group GROUP_NAME       Computer group (smart or static)"
+            print_target_usage
             echo ""
             echo "Apps:"
             echo "  --app PATTERN            Substring match (repeat for multiple apps)"
@@ -123,10 +101,7 @@ if [[ ${#app_patterns[@]} -eq 0 ]]; then
     exit 1
 fi
 
-if [[ -z "$target_mode" && ( "${no_interaction:-0}" -eq 1 || ! -t 0 ) ]]; then
-    echo "ERROR: specify a target via --serial, --name, --name-match, or --group."
-    exit 1
-fi
+require_computer_target || exit 1
 
 # -------------------------------------------------------------------------
 # INSTANCE SELECTION
@@ -134,45 +109,21 @@ fi
 
 resolve_jamf_cli || exit 1
 
-choose_destination_instances
-
-jss_instance="${instance_choice_array[0]:-$chosen_instance}"
-if [[ -z "$jss_instance" ]]; then
-    echo "ERROR: no instance selected."
-    exit 1
-fi
-if [[ ${#instance_choice_array[@]} -gt 1 ]]; then
-    echo "NOTE: this report runs against one instance at a time. Using: $jss_instance"
-fi
-
 trap remove_jamfcli_token EXIT
-if ! token_for_instance "$jss_instance"; then
-    echo "ERROR: could not obtain a token for $jss_instance"
-    exit 1
-fi
+choose_single_instance || exit 1
 
 # -------------------------------------------------------------------------
 # RESOLVE TARGET SERIALS
 # -------------------------------------------------------------------------
 
-if [[ -z "$target_mode" ]]; then
-    choose_computer_targets || exit 1
-fi
-
-resolve_target_serials
-
-if [[ ${#resolved_serials[@]} -eq 0 ]]; then
-    echo "ERROR: no target computers resolved."
-    exit 1
-fi
+select_target_serials || exit 1
 
 # -------------------------------------------------------------------------
 # OUTPUT
 # -------------------------------------------------------------------------
 
 timestamp=$(/bin/date '+%Y%m%d-%H%M%S')
-instance_short="${jss_instance#*://}"
-instance_short="${instance_short%%/*}"
+instance_short=$(url_host "$jss_instance")
 choose_output_dir || exit 1
 csv_file="${output_dir}/report-app-installs_${instance_short}_${timestamp}.csv"
 

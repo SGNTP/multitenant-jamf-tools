@@ -1153,12 +1153,10 @@ run_jamfcli() {
 # JAMF-CLI SCRIPT HELPERS (bash 3.2 compatible)
 # --------------------------------------------------------------------------------
 
-# Set $jamf_cli_path, keeping a valid value already set (e.g. from -j).
+# Set $jamf_cli_path, keeping a valid value already set (e.g. from -j), and
+# offer to install jamf-cli if it is missing.
 resolve_jamf_cli() {
-    if [[ ! -x "$jamf_cli_path" ]]; then
-        jamf_cli_path=$(command -v jamf-cli)
-    fi
-    if [[ ! -x "$jamf_cli_path" ]]; then
+    if ! ensure_dependencies jamf-cli; then
         echo "ERROR: jamf-cli not found. Install it or pass -j /path/to/jamf-cli."
         return 1
     fi
@@ -1194,22 +1192,11 @@ jc() {
 # Set $output_dir. Keeps a value already set (e.g. from -o); otherwise offers
 # /tmp or ~/Desktop, defaulting to /tmp when non-interactive.
 choose_output_dir() {
-    local choice
     if [[ -z "$output_dir" ]]; then
         output_dir="/tmp"
-        if [[ -t 0 && "${no_interaction:-0}" -ne 1 ]]; then
-            echo
-            echo "Save output files to:"
-            echo "   [1] /tmp"
-            echo "   [2] ~/Desktop"
-            while true; do
-                read -r -p "   Choose by number [1]: " choice
-                case "${choice:-1}" in
-                    1) output_dir="/tmp"; break ;;
-                    2) output_dir="${HOME}/Desktop"; break ;;
-                    *) echo "   Not a valid option." ;;
-                esac
-            done
+        if [[ -t 0 && "${no_interaction:-0}" -ne 1 ]] \
+            && choose_from_menu 1 "Save output files to:" "/tmp" "~/Desktop"; then
+            [[ "$menu_choice" -eq 2 ]] && output_dir="${HOME}/Desktop"
         fi
     fi
     output_dir="${output_dir/#\~/$HOME}"
@@ -1222,10 +1209,11 @@ choose_output_dir() {
 
 # Convert a CSV to a formatted .xlsx (bold frozen header, fitted widths, optional
 # 1-based hyperlink column). On success deletes the CSV and prints the xlsx path;
-# otherwise prints the CSV path and returns 1.
+# otherwise prints the CSV path and returns 1. Uses $mjt_python, so call
+# ensure_dependencies "openpyxl?" first.
 csv_to_xlsx() {
     local csv_path="$1" xlsx_path="$2" title="$3" url_col="${4:-0}"
-    if /usr/bin/python3 - "$csv_path" "$xlsx_path" "$title" "$url_col" 2>/dev/null <<'PY'
+    if "$mjt_python" - "$csv_path" "$xlsx_path" "$title" "$url_col" 2>/dev/null <<'PY'
 import csv, sys
 from openpyxl import Workbook
 from openpyxl.styles import Font
@@ -1264,8 +1252,8 @@ PY
 
 # Interactively pick a computer group on the current instance; sets $group_name.
 choose_computer_group() {
-    local groups_json menu gid gtype name filter lower_filter lower_name i n choice
-    local -a ids=() types=() names=() fnames=() ftypes=()
+    local groups_json menu gid gtype name filter lower_filter lower_name i
+    local -a ids=() types=() names=() fnames=() ftypes=() labels=()
     echo "   Listing computer groups on ${jss_instance}..."
     groups_json=$(jc pro classic-computer-groups list --output json 2>/dev/null)
     menu=$(printf '%s' "$groups_json" | /usr/bin/python3 -c '
@@ -1308,48 +1296,32 @@ for r in sorted(rows, key=lambda r: r[2].lower()):
             ftypes+=("${types[$i]}"); fnames+=("${names[$i]}")
         fi
     done
-    n=${#fnames[@]}
-    if [[ $n -eq 0 ]]; then
+    if [[ ${#fnames[@]} -eq 0 ]]; then
         echo "   No group name matches \"${filter}\"."
         return 1
     fi
-    echo
     for i in "${!fnames[@]}"; do
-        printf "     [%d] %-6s %s\n" "$((i + 1))" "${ftypes[$i]}" "${fnames[$i]}"
+        labels+=("$(printf '%-6s %s' "${ftypes[$i]}" "${fnames[$i]}")")
     done
     echo
-    while true; do
-        read -r -p "     Choose by number: " choice
-        choice=$(printf '%s' "$choice" | /usr/bin/tr -d '[:space:]')
-        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= n )); then
-            group_name="${fnames[$((choice - 1))]}"
-            echo "     Selected: ${group_name}"
-            return 0
-        fi
-        echo "     Not a valid option."
-    done
+    choose_from_menu "" "" "${labels[@]}" || return 1
+    group_name="${fnames[$((menu_choice - 1))]}"
+    echo "   Selected: ${group_name}"
 }
 
 # Ask how to select target computers. Sets $target_mode (serial | name |
 # name-match | group) plus $target_values (array) or $group_name.
 choose_computer_targets() {
-    local choice input
-    echo
-    echo "Select target computers by:"
-    echo "   [1] Serial number(s)"
-    echo "   [2] Computer name(s)"
-    echo "   [3] Partial computer name"
-    echo "   [4] Computer group (smart or static)"
-    while true; do
-        read -r -p "   Choose by number: " choice
-        case "$choice" in
-            1) target_mode="serial"; break ;;
-            2) target_mode="name"; break ;;
-            3) target_mode="name-match"; break ;;
-            4) target_mode="group"; break ;;
-            *) echo "   Not a valid option." ;;
-        esac
-    done
+    local input item
+    choose_from_menu "" "Select target computers by:" \
+        "Serial number(s)" "Computer name(s)" "Partial computer name" \
+        "Computer group (smart or static)" || return 1
+    case "$menu_choice" in
+        1) target_mode="serial" ;;
+        2) target_mode="name" ;;
+        3) target_mode="name-match" ;;
+        4) target_mode="group" ;;
+    esac
     case "$target_mode" in
         serial|name)
             read -r -p "   Enter ${target_mode}s, separated by commas: " input
@@ -1471,6 +1443,416 @@ fetch_computer_by_serial() {
         [[ "$upper" == "$serial" ]] && break
     done
     return 1
+}
+
+# --------------------------------------------------------------------------------
+# SHARED SCRIPT UTILITIES (bash 3.2 compatible)
+# --------------------------------------------------------------------------------
+
+# Python used by helpers that need third-party modules (csv_to_xlsx), and jq.
+# ensure_dependencies / resolve_python update these.
+mjt_python="${mjt_python:-/usr/bin/python3}"
+jq_bin="${jq_bin:-/usr/bin/jq}"
+
+# section header
+section() {
+    echo
+    echo "=================================================================="
+    echo "  ${1}"
+    echo "=================================================================="
+}
+
+# y/N confirm honouring $assume_yes (--yes). $1 = prompt. Returns 0 for yes.
+confirm() {
+    [[ "${assume_yes:-0}" -eq 1 ]] && return 0
+    local ans
+    read -r -p "${1} (Y/N) : " ans
+    [[ "${ans}" =~ ^[Yy] ]]
+}
+
+to_lower() {
+    printf '%s' "$1" | /usr/bin/tr '[:upper:]' '[:lower:]'
+}
+
+# Lowercase host from a URL (strip scheme, path, port).
+url_host() {
+    local u="${1#*://}"
+    u="${u%%/*}"; u="${u%%:*}"
+    to_lower "${u}"
+}
+
+# Filename-safe slug from a URL host, e.g. https://acme.jamfcloud.com -> acme-jamfcloud-com
+instance_slug() {
+    url_host "$1" | /usr/bin/tr -cs 'a-z0-9' '-' | /usr/bin/sed 's/^-//;s/-$//'
+}
+
+# choose_from_menu DEFAULT TITLE OPTION...
+# Print a numbered menu and set $menu_choice to the 1-based number picked.
+# DEFAULT (a number, or "" for none) is used when Enter is pressed. Re-prompts
+# on invalid input; returns 1 if input runs out.
+choose_from_menu() {
+    local default="$1" title="$2" opt prompt i=1
+    shift 2
+    if [[ -n "$title" ]]; then
+        echo
+        echo "$title"
+    fi
+    for opt in "$@"; do
+        printf "   [%d] %s\n" "$i" "$opt"
+        i=$((i + 1))
+    done
+    prompt="   Choose by number: "
+    [[ -n "$default" ]] && prompt="   Choose by number [${default}]: "
+    while true; do
+        read -r -p "$prompt" menu_choice || return 1
+        menu_choice=$(printf '%s' "${menu_choice:-$default}" | /usr/bin/tr -d '[:space:]')
+        if [[ "$menu_choice" =~ ^[0-9]+$ ]] && (( menu_choice >= 1 && menu_choice <= $# )); then
+            return 0
+        fi
+        echo "   Not a valid option."
+    done
+}
+
+# Promote a single -i (stored in chosen_instances[0]) to $chosen_instance, which
+# is what choose_destination_instances reads for one instance, and say which
+# instance(s) the run targets.
+announce_instances() {
+    if [[ -z "$chosen_instance" && ${#chosen_instances[@]} -eq 1 ]]; then
+        chosen_instance="${chosen_instances[0]}"
+    fi
+    if [[ -n "$chosen_instance" ]]; then
+        echo "Running on instance: $chosen_instance"
+    elif [[ ${#chosen_instances[@]} -gt 1 ]]; then
+        echo "Running on instances: ${chosen_instances[*]}"
+    fi
+}
+
+# For single-instance scripts: pick the instance and authenticate for jc().
+# Callers should `trap remove_jamfcli_token EXIT` first.
+choose_single_instance() {
+    choose_destination_instances
+    jss_instance="${instance_choice_array[0]:-$chosen_instance}"
+    if [[ -z "$jss_instance" ]]; then
+        echo "ERROR: no instance selected."
+        return 1
+    fi
+    if [[ ${#instance_choice_array[@]} -gt 1 ]]; then
+        echo "NOTE: this script runs against one instance at a time. Using: $jss_instance"
+    fi
+    if ! token_for_instance "$jss_instance"; then
+        echo "ERROR: could not obtain a token for $jss_instance"
+        return 1
+    fi
+}
+
+# Handle one --serial / --name / --name-match / --group flag at the start of "$@".
+# Sets $target_mode plus $target_values or $group_name, and $target_args_used to
+# the number of arguments consumed. Usage in an arg loop:
+#   --serial|--name|--name-match|--group)
+#       parse_target_arg "$@" || exit 1; shift "$target_args_used"; continue ;;
+parse_target_arg() {
+    local flag="$1" mode
+    case "$flag" in
+        --serial|--name) mode="${flag#--}" ;;
+        --name-match)    mode="name-match" ;;
+        --group)         mode="group" ;;
+        *) return 1 ;;
+    esac
+    if [[ -n "$target_mode" && "$target_mode" != "$mode" ]]; then
+        echo "ERROR: only one of --serial, --name, --name-match, --group may be used at a time."
+        return 1
+    fi
+    target_mode="$mode"
+    shift
+    target_args_used=1
+    case "$mode" in
+        serial|name)
+            while [[ "$#" -gt 0 && "$1" != -* ]]; do
+                target_values+=("$1"); shift
+                target_args_used=$((target_args_used + 1))
+            done
+            ;;
+        *)
+            if [[ "$#" -eq 0 ]]; then
+                echo "ERROR: ${flag} needs a value."
+                return 1
+            fi
+            if [[ "$mode" == "group" ]]; then
+                group_name="$1"
+            else
+                target_values=("$1")
+            fi
+            target_args_used=2
+            ;;
+    esac
+}
+
+print_target_usage() {
+    echo "Target (pick one; interactive menu if omitted):"
+    echo "  --serial S1 S2 ...       Explicit serial numbers"
+    echo "  --name N1 N2 ...         Exact computer names"
+    echo "  --name-match PATTERN     Partial name match"
+    echo "  --group GROUP_NAME       Computer group (smart or static)"
+}
+
+# Fail early when no target flag was given and nobody can answer the menu.
+require_computer_target() {
+    if [[ -z "$target_mode" && ( "${no_interaction:-0}" -eq 1 || ! -t 0 ) ]]; then
+        echo "ERROR: specify a target via --serial, --name, --name-match, or --group."
+        return 1
+    fi
+}
+
+# Ask for targets if no flag set them, then fill $resolved_serials.
+select_target_serials() {
+    if [[ -z "$target_mode" ]]; then
+        choose_computer_targets || return 1
+    fi
+    resolve_target_serials
+    if [[ ${#resolved_serials[@]} -eq 0 ]]; then
+        echo "ERROR: no target computers resolved."
+        return 1
+    fi
+}
+
+# run "$@" in the background while showing an animated progress bar.
+# Returns the command's exit code.
+run_with_progress() {
+    local label="$1"; shift
+    local logf pid pct hashes rc
+    logf=$(/usr/bin/mktemp /tmp/mjt_progress.XXXXXX)
+    ( "$@" >"$logf" 2>&1 ) &
+    pid=$!
+    pct=0
+    while kill -0 "$pid" 2>/dev/null; do
+        pct=$(( pct < 95 ? pct + 5 : 95 ))
+        hashes=$(printf '#%.0s' $(/usr/bin/seq 1 $(( pct / 5 ))))
+        printf "\r   %s: [%-20s] %3d%%" "$label" "$hashes" "$pct"
+        /bin/sleep 0.3
+    done
+    wait "$pid"; rc=$?
+    if [[ $rc -eq 0 ]]; then
+        printf "\r   %s: [%-20s] %3d%%\n" "$label" "####################" 100
+    else
+        printf "\r   %s: failed.%-30s\n" "$label" ""
+        /usr/bin/tail -3 "$logf" | /usr/bin/sed 's/^/      /'
+    fi
+    /bin/rm -f "$logf"
+    return $rc
+}
+
+# --------------------------------------------------------------------------------
+# DEPENDENCY CHECKS
+# --------------------------------------------------------------------------------
+
+# Print the Homebrew binary path, if Homebrew is installed.
+brew_bin() {
+    local b
+    for b in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+        if [[ -x "$b" ]]; then
+            echo "$b"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# resolve_python [MIN_MINOR] [MODULE...]
+# Set $mjt_python to the first Python 3.MIN_MINOR+ (default 3.9) that already
+# has every MODULE, else the first that meets the version. Returns 1 if none does.
+resolve_python() {
+    local min_minor="${1:-9}" py mod has_all first=""
+    [[ $# -gt 0 ]] && shift
+    for py in /usr/bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/local/autopkg/python; do
+        [[ -x "$py" ]] || continue
+        "$py" -c "import sys; sys.exit(0 if sys.version_info >= (3, ${min_minor}) else 1)" 2>/dev/null || continue
+        [[ -z "$first" ]] && first="$py"
+        has_all=1
+        for mod in "$@"; do
+            if ! "$py" -c "import ${mod}" 2>/dev/null; then
+                has_all=0
+                break
+            fi
+        done
+        if [[ $has_all -eq 1 ]]; then
+            mjt_python="$py"
+            return 0
+        fi
+    done
+    [[ -n "$first" ]] || return 1
+    mjt_python="$first"
+}
+
+# pip-install into the user site for $mjt_python. Externally managed Pythons
+# (e.g. Homebrew's) refuse that, so retry with --break-system-packages, which
+# is safe here because --user never touches the Python's own site-packages.
+pip_install_user() {
+    "$mjt_python" -m pip install --user "$@" \
+        || "$mjt_python" -m pip install --user --break-system-packages "$@"
+}
+
+# Returns 0 if dependency $1 is available, updating $jamf_cli_path / $jq_bin.
+dependency_present() {
+    local path
+    case "$1" in
+        jamf-cli)
+            for path in "$jamf_cli_path" "$(command -v jamf-cli 2>/dev/null)" \
+                /opt/homebrew/bin/jamf-cli /usr/local/bin/jamf-cli; do
+                if [[ -n "$path" && -x "$path" ]]; then
+                    jamf_cli_path="$path"
+                    return 0
+                fi
+            done
+            return 1
+            ;;
+        jq)
+            for path in /usr/bin/jq "$(command -v jq 2>/dev/null)" \
+                /opt/homebrew/bin/jq /usr/local/bin/jq; do
+                if [[ -n "$path" && -x "$path" ]]; then
+                    jq_bin="$path"
+                    return 0
+                fi
+            done
+            return 1
+            ;;
+        autopkg)
+            [[ -x /usr/local/bin/autopkg ]]
+            ;;
+        python3.*)
+            "$mjt_python" -c "import sys; sys.exit(0 if sys.version_info >= (3, ${1#python3.}) else 1)" 2>/dev/null
+            ;;
+        openpyxl|msoffcrypto)
+            "$mjt_python" -c "import $1" 2>/dev/null
+            ;;
+        *)
+            echo "   [ensure_dependencies] unknown dependency: $1"
+            return 1
+            ;;
+    esac
+}
+
+# Explain a missing dependency and offer to install it. Never installs without
+# a y answer; in -x or non-tty runs it prints the install command instead.
+# Homebrew and AutoPkg are never installed from here.
+offer_dependency() {
+    local name="$1" why cmd brew ans
+    local -a install_cmd=()
+    brew=$(brew_bin)
+    case "$name" in
+        jamf-cli)
+            why="Jamf's command-line client for the Jamf Pro API."
+            install_cmd=("$brew" install Jamf-Concepts/tap/jamf-cli) ;;
+        jq)
+            why="JSON processor used to parse API responses."
+            install_cmd=("$brew" install jq) ;;
+        python3.*)
+            why="Python ${name#python} or newer."
+            install_cmd=("$brew" install python) ;;
+        openpyxl)
+            why="Python package for formatted .xlsx output (without it, output stays .csv)."
+            install_cmd=(pip_install_user openpyxl) ;;
+        msoffcrypto)
+            why="Python package (msoffcrypto-tool) that password-protects the workbook."
+            install_cmd=(pip_install_user msoffcrypto-tool) ;;
+        autopkg)
+            why="AutoPkg, used to run the recipes for this step." ;;
+        *)
+            return 1 ;;
+    esac
+    echo
+    echo "   Missing: ${name} - ${why}"
+    if [[ "$name" == "autopkg" ]]; then
+        echo "   Install the latest release from https://github.com/autopkg/autopkg/releases"
+        return 1
+    fi
+    if [[ "${install_cmd[0]}" == "pip_install_user" ]]; then
+        cmd="${mjt_python} -m pip install --user ${install_cmd[1]}"
+    else
+        cmd="brew ${install_cmd[*]:1}"
+        if [[ -z "$brew" ]]; then
+            echo "   It installs with Homebrew, which is not installed."
+            echo "   Install Homebrew from https://brew.sh, then run: ${cmd}"
+            return 1
+        fi
+    fi
+    if [[ "${no_interaction:-0}" -eq 1 || ! -t 0 ]]; then
+        echo "   To install it, run: ${cmd}"
+        return 1
+    fi
+    read -r -p "   Install it now? [y/N]: " ans
+    if [[ ! "$ans" =~ ^[Yy] ]]; then
+        echo "   To install it later, run: ${cmd}"
+        return 1
+    fi
+    run_with_progress "Installing ${name}" "${install_cmd[@]}" || return 1
+    if [[ "$name" == python3.* ]]; then
+        resolve_python "${name#python3.}"
+    fi
+    dependency_present "$name"
+}
+
+# ensure_dependencies DEP...
+# Check each dependency and offer to install whatever is missing. A trailing
+# "?" marks one as optional (missing only warns). Known: jamf-cli, jq, autopkg,
+# python3.N, and the Python modules openpyxl and msoffcrypto. List python3.N
+# before the modules. Sets $mjt_python to an interpreter that satisfies the
+# Python requirements. Returns 1 if a required dependency is still missing.
+ensure_dependencies() {
+    local dep name min_minor=9 missing=0
+    local -a modules=()
+    for dep in "$@"; do
+        name="${dep%\?}"
+        case "$name" in
+            python3.*) min_minor="${name#python3.}" ;;
+            openpyxl|msoffcrypto) modules+=("$name") ;;
+        esac
+    done
+    resolve_python "$min_minor" "${modules[@]}"
+    for dep in "$@"; do
+        name="${dep%\?}"
+        dependency_present "$name" && continue
+        offer_dependency "$name" && continue
+        if [[ "$name" != "$dep" ]]; then
+            echo "   Continuing without ${name}."
+        else
+            missing=1
+        fi
+    done
+    return $missing
+}
+
+# Offer to upgrade pip package $1 for $mjt_python when a newer release exists.
+# Interactive runs only.
+offer_python_package_update() {
+    local pkg="$1" out cur latest ans
+    [[ "${no_interaction:-0}" -eq 1 || ! -t 0 ]] && return 0
+    echo "   Checking ${pkg} for updates..."
+    out=$("$mjt_python" -c '
+import json, subprocess, sys
+try:
+    out = subprocess.check_output(
+        [sys.executable, "-m", "pip", "list", "--outdated", "--format=json"],
+        stderr=subprocess.DEVNULL)
+    data = json.loads(out.decode() or "[]")
+except Exception:
+    sys.exit(0)
+for p in data:
+    if str(p.get("name", "")).lower() == sys.argv[1].lower():
+        print(p.get("version", ""), p.get("latest_version", ""))
+        break
+' "$pkg" 2>/dev/null)
+    if [[ -z "$out" ]]; then
+        echo "   ${pkg} is up to date."
+        return 0
+    fi
+    cur="${out%% *}"
+    latest="${out#* }"
+    read -r -p "   ${pkg} ${cur} -> ${latest} is available. Update now? [y/N]: " ans
+    if [[ "$ans" =~ ^[Yy] ]]; then
+        run_with_progress "Updating ${pkg}" pip_install_user --upgrade "$pkg"
+    else
+        echo "   Skipped; continuing with ${pkg} ${cur}."
+    fi
 }
 
 encode_name() {

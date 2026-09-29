@@ -53,8 +53,6 @@ if [[ ! -d "${this_script_dir}" ]]; then
     exit 1
 fi
 
-resolve_jamf_cli || exit 1
-
 # --------------------------------------------------------------------------------
 # FUNCTIONS
 # --------------------------------------------------------------------------------
@@ -121,7 +119,7 @@ policies_for_instance() {
         # confirm it exists and grab its name
         local one
         one=$(jc pro classic-policies get "$policy_id" -o json 2>/dev/null \
-            | jq -r '(.policy // .) | .general.name // .name // empty')
+            | "$jq_bin" -r '(.policy // .) | .general.name // .name // empty')
         [[ -n "$one" ]] && printf '%s\t%s\n' "$policy_id" "$one"
         return
     fi
@@ -132,13 +130,13 @@ policies_for_instance() {
             -H "Authorization: Bearer $token" \
             -H "Accept: application/json" \
             "${jss_url%/}/JSSResource/policies/category/$(encode_name "$policy_category")" \
-            | jq -r '(.policies // [])[] | "\(.id)\t\(.name)"' 2>/dev/null
+            | "$jq_bin" -r '(.policies // [])[] | "\(.id)\t\(.name)"' 2>/dev/null
         return
     fi
 
     # all / name / keyword all start from the full policy list
     jc pro classic-policies list -o json 2>/dev/null \
-        | jq -r --arg nm "$policy_name" --arg kw "$policy_keyword" '
+        | "$jq_bin" -r --arg nm "$policy_name" --arg kw "$policy_keyword" '
             (if type=="object" then (.policies // .results // .) else . end)[]
             | {id: .id, name: (.name // "")}
             | select(
@@ -170,40 +168,30 @@ flush_policy() {
 
 # top-level: report vs flush
 menu_choose_mode() {
-    local sel
     echo
     echo "----------------------------------------"
     echo "  Policy Log Flusher"
     echo "----------------------------------------"
     echo "Reports on, and optionally flushes, Jamf Pro policy execution logs."
-    echo
-    echo "   [1] Report  - read-only list of the policies a flush would target"
-    echo "   [2] Flush   - flush the execution logs"
-    echo
-    read -r -p "   Choose by number [1]: " sel
-    case "$sel" in
-        ""|1) mode="report" ;;
-        2)    mode="flush" ;;
-        *) echo "ERROR: invalid selection. Aborting."; exit 1 ;;
+    choose_from_menu 1 "" \
+        "Report  - read-only list of the policies a flush would target" \
+        "Flush   - flush the execution logs" || exit 1
+    case "$menu_choice" in
+        1) mode="report" ;;
+        2) mode="flush" ;;
     esac
 }
 
 # choose which policies to target (only when no scope flag was given)
 menu_choose_scope() {
     [[ -n "$policy_id$policy_name$policy_keyword$policy_category" ]] && return 0
-    local sel kw cat
-    echo
-    echo "Which policies?"
-    echo "   [1] All policies on each chosen instance"
-    echo "   [2] Policies whose name contains a keyword"
-    echo "   [3] Policies in a category"
-    echo
-    read -r -p "   Choose by number [1]: " sel
-    case "$sel" in
-        ""|1) : ;;
-        2)    read -r -p "   Keyword: " kw; policy_keyword="$kw" ;;
-        3)    read -r -p "   Category name: " cat; policy_category="$cat" ;;
-        *) echo "ERROR: invalid selection. Aborting."; exit 1 ;;
+    choose_from_menu 1 "Which policies?" \
+        "All policies on each chosen instance" \
+        "Policies whose name contains a keyword" \
+        "Policies in a category" || exit 1
+    case "$menu_choice" in
+        2) read -r -p "   Keyword: " policy_keyword ;;
+        3) read -r -p "   Category name: " policy_category ;;
     esac
 }
 
@@ -211,37 +199,19 @@ menu_choose_scope() {
 menu_choose_interval() {
     local intervals=(Zero+Days One+Day One+Week One+Month Three+Months Six+Months)
     local labels=("Zero days (all logs)" "One day" "One week" "One month" "Three months" "Six months")
-    local i sel
-    echo
-    echo "Flush logs older than:"
-    for i in "${!intervals[@]}"; do
-        printf "   [%s] %s\n" "$i" "${labels[$i]}"
-    done
-    echo
-    read -r -p "   Choose by number [0]: " sel
-    [[ -z "$sel" ]] && sel=0
-    if [[ "$sel" =~ ^[0-9]+$ ]] && [[ -n "${intervals[$sel]:-}" ]]; then
-        interval="${intervals[$sel]}"
-        echo "   Selected: ${labels[$sel]}"
-    else
-        echo "ERROR: invalid selection. Aborting."
-        exit 1
-    fi
+    choose_from_menu 1 "Flush logs older than:" "${labels[@]}" || exit 1
+    interval="${intervals[$((menu_choice - 1))]}"
+    echo "   Selected: ${labels[$((menu_choice - 1))]}"
 }
 
 # flush mode: preview vs apply
 menu_choose_run_mode() {
-    local sel
-    echo
-    echo "Run mode:"
-    echo "   [1] Preview only (dry-run, flushes nothing)"
-    echo "   [2] Flush for real"
-    echo
-    read -r -p "   Choose by number [1]: " sel
-    case "$sel" in
-        ""|1) dry_run=1 ;;
-        2)    dry_run=0 ;;
-        *) echo "ERROR: invalid selection. Aborting."; exit 1 ;;
+    choose_from_menu 1 "Run mode:" \
+        "Preview only (dry-run, flushes nothing)" \
+        "Flush for real" || exit 1
+    case "$menu_choice" in
+        1) dry_run=1 ;;
+        2) dry_run=0 ;;
     esac
 }
 
@@ -282,6 +252,9 @@ while [[ "$#" -gt 0 ]]; do
 done
 echo
 
+# openpyxl is optional (formatted .xlsx output, else .csv)
+ensure_dependencies jamf-cli jq "openpyxl?" || exit 1
+
 # reject conflicting scope flags
 scope_flags=0
 [[ -n "$policy_id" ]] && (( scope_flags++ ))
@@ -308,14 +281,7 @@ scope_desc="ALL policies"
 [[ -n "$policy_keyword" ]] && scope_desc="policies whose name contains '$policy_keyword'"
 [[ -n "$policy_category" ]] && scope_desc="policies in category '$policy_category'"
 
-if [[ -n "$chosen_instance" ]]; then
-    echo "Running on instance: $chosen_instance"
-elif [[ ${#chosen_instances[@]} -eq 1 ]]; then
-    chosen_instance="${chosen_instances[0]}"
-    echo "Running on instance: $chosen_instance"
-elif [[ ${#chosen_instances[@]} -gt 1 ]]; then
-    echo "Running on instances: ${chosen_instances[*]}"
-fi
+announce_instances
 
 # select the instances to operate on
 choose_destination_instances

@@ -78,8 +78,6 @@ if [[ ! -d "${this_script_dir}" ]]; then
     exit 1
 fi
 
-resolve_jamf_cli || exit 1
-
 # --------------------------------------------------------------------------------
 # FUNCTIONS
 # --------------------------------------------------------------------------------
@@ -157,31 +155,8 @@ human_duration() {
     else printf '%ss' "${s}"; fi
 }
 
-# Extract the lowercase host from a URL (strip scheme, path, port).
-url_host() {
-    local u="${1#*://}"
-    u="${u%%/*}"; u="${u%%:*}"
-    printf '%s' "${u}" | /usr/bin/tr 'A-Z' 'a-z'
-}
-
-# section header
-section() {
-    echo
-    echo "=================================================================="
-    echo "  ${1}"
-    echo "=================================================================="
-}
-
 # dim breadcrumb showing where this setting lives in Jamf Pro
 crumb() { echo "  (${1})"; echo; }
-
-# y/N confirm honouring --yes. $1 = prompt. Returns 0 for yes.
-confirm() {
-    [[ $assume_yes -eq 1 ]] && return 0
-    local ans
-    read -r -p "${1} (Y/N) : " ans
-    [[ "${ans}" =~ ^[Yy] ]]
-}
 
 # True (0) if $1 appears as a whole word in the space-separated list $2.
 name_in_list() {
@@ -1060,8 +1035,7 @@ apply_reenrol_policy() {
         return
     fi
 
-    if ! [[ -x /usr/local/bin/autopkg ]]; then
-        echo "  ERROR: autopkg not found at /usr/local/bin/autopkg."
+    if ! ensure_dependencies autopkg; then
         echo
         returncode=1
         return
@@ -1172,6 +1146,8 @@ while [[ "$#" -gt 0 ]]; do
 done
 echo
 
+resolve_jamf_cli || exit 1
+
 # temp working directory for per-instance API scratch files
 workdir=$(/usr/bin/mktemp -d /tmp/configure-macos-laps-XXXXXX)
 trap 'remove_jamfcli_token; /bin/rm -rf "${workdir}"' EXIT
@@ -1190,14 +1166,7 @@ fi
 echo "This tool applies the Jamf LAPS runbook to the instance(s) you choose."
 [[ $dry_run -eq 1 ]] && echo "(dry-run: no changes will be written)"
 
-if [[ ${#chosen_instances[@]} -eq 1 ]]; then
-    # a single -i lands in chosen_instances[0]; choose_destination_instances only
-    # resolves the singular chosen_instance (or chosen_instances when >1), so promote it.
-    chosen_instance="${chosen_instances[0]}"
-    echo "Running on instance: $chosen_instance"
-elif [[ ${#chosen_instances[@]} -gt 1 ]]; then
-    echo "Running on instances: ${chosen_instances[*]}"
-fi
+announce_instances
 
 # select the instances that will be changed
 choose_destination_instances

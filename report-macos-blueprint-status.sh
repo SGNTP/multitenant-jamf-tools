@@ -62,13 +62,6 @@ if [[ ! -d "${this_script_dir}" ]]; then
     exit 1
 fi
 
-resolve_jamf_cli || exit 1
-
-if [[ ! -x /usr/bin/python3 ]]; then
-    echo "ERROR: /usr/bin/python3 not found (install the Xcode Command Line Tools)."
-    exit 1
-fi
-
 # --------------------------------------------------------------------------------
 # FUNCTIONS
 # --------------------------------------------------------------------------------
@@ -117,29 +110,6 @@ Examples:
 ./report-macos-blueprint-status.sh -il my-mac-list --all \
     --group "All Managed" --blueprint-id abcdef01-2345-... --dry-run --yes
 USAGE
-}
-
-# section header
-section() {
-    echo
-    echo "=================================================================="
-    echo "  ${1}"
-    echo "=================================================================="
-}
-
-# Extract the lowercase host from a URL (strip scheme, path, port).
-url_host() {
-    local u="${1#*://}"
-    u="${u%%/*}"; u="${u%%:*}"
-    printf '%s' "${u}" | /usr/bin/tr 'A-Z' 'a-z'
-}
-
-# y/N confirm honouring --yes. $1 = prompt. Returns 0 for yes.
-confirm() {
-    [[ $assume_yes -eq 1 ]] && return 0
-    local ans
-    read -r -p "${1} (Y/N) : " ans
-    [[ "${ans}" =~ ^[Yy] ]]
 }
 
 # Build the default per-instance CSV path for this run.
@@ -954,6 +924,12 @@ if [[ $dry_run -eq 0 ]]; then
     choose_output_dir || exit 1
 fi
 
+resolve_jamf_cli || exit 1
+if [[ ! -x /usr/bin/python3 ]]; then
+    echo "ERROR: /usr/bin/python3 not found (install the Xcode Command Line Tools)."
+    exit 1
+fi
+
 # temp working directory for per-run scratch files
 workdir=$(/usr/bin/mktemp -d /tmp/report-macos-blueprint-status-XXXXXX)
 trap 'remove_jamfcli_token; /bin/rm -rf "${workdir}"' EXIT
@@ -963,12 +939,7 @@ write_python_helpers
 echo "This tool reports blueprint / DDM status across the instance(s) you choose."
 [[ $dry_run -eq 1 ]] && echo "(dry-run: no CSV will be written)"
 
-if [[ ${#chosen_instances[@]} -eq 1 ]]; then
-    chosen_instance="${chosen_instances[0]}"
-    echo "Running on instance: $chosen_instance"
-elif [[ ${#chosen_instances[@]} -gt 1 ]]; then
-    echo "Running on instances: ${chosen_instances[*]}"
-fi
+announce_instances
 
 # select the instances that will be reported on
 choose_destination_instances
