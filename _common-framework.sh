@@ -1250,19 +1250,24 @@ PY
     fi
 }
 
-# Interactively pick a computer group on the current instance; sets $group_name.
-choose_computer_group() {
+# Interactively pick a computer or mobile device group (per $device_platform)
+# on the current instance; sets $group_name.
+choose_device_group() {
     local groups_json menu gid gtype name filter lower_filter lower_name i
+    local noun="computer" group_cmd="classic-computer-groups"
     local -a ids=() types=() names=() fnames=() ftypes=() labels=()
-    echo "   Listing computer groups on ${jss_instance}..."
-    groups_json=$(jc pro classic-computer-groups list --output json 2>/dev/null)
+    if is_mobile_platform; then
+        noun="mobile device"; group_cmd="classic-mobile-device-groups"
+    fi
+    echo "   Listing ${noun} groups on ${jss_instance}..."
+    groups_json=$(jc pro "$group_cmd" list --output json 2>/dev/null)
     menu=$(printf '%s' "$groups_json" | /usr/bin/python3 -c '
 import json, sys
 try:
     raw = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
-items = raw.get("computer_groups") if isinstance(raw, dict) else raw
+items = (raw.get("computer_groups") or raw.get("mobile_device_groups")) if isinstance(raw, dict) else raw
 if not isinstance(items, list):
     items = raw.get("results", []) if isinstance(raw, dict) else []
 def clean(s):
@@ -1282,12 +1287,12 @@ for r in sorted(rows, key=lambda r: r[2].lower()):
         ids+=("$gid"); types+=("$gtype"); names+=("$name")
     done <<< "$menu"
     if [[ ${#names[@]} -eq 0 ]]; then
-        echo "   ERROR: no computer groups found on ${jss_instance}."
+        echo "   ERROR: no ${noun} groups found on ${jss_instance}."
         return 1
     fi
 
     echo
-    echo "   Select a computer group (${#names[@]} on ${jss_instance})."
+    echo "   Select a ${noun} group (${#names[@]} on ${jss_instance})."
     read -r -p "   Type part of a name to filter, or press Enter to list all: " filter
     lower_filter=$(printf '%s' "$filter" | /usr/bin/tr '[:upper:]' '[:lower:]')
     for i in "${!names[@]}"; do
@@ -1309,13 +1314,22 @@ for r in sorted(rows, key=lambda r: r[2].lower()):
     echo "   Selected: ${group_name}"
 }
 
-# Ask how to select target computers. Sets $target_mode (serial | name |
-# name-match | group) plus $target_values (array) or $group_name.
-choose_computer_targets() {
-    local input item
-    choose_from_menu "" "Select target computers by:" \
-        "Serial number(s)" "Computer name(s)" "Partial computer name" \
-        "Computer group (smart or static)" || return 1
+# Computer-only group picker, for scripts that don't offer a platform choice.
+choose_computer_group() {
+    local device_platform="computer"
+    choose_device_group
+}
+
+# Ask how to select target devices (per $device_platform). Sets $target_mode
+# (serial | name | name-match | group) plus $target_values (array) or $group_name.
+choose_device_targets() {
+    local input item noun="computer" title="Computer"
+    if is_mobile_platform; then
+        noun="device"; title="Mobile device"
+    fi
+    choose_from_menu "" "Select target ${noun}s by:" \
+        "Serial number(s)" "${title} name(s)" "Partial ${noun} name" \
+        "${title} group (smart or static)" || return 1
     case "$menu_choice" in
         1) target_mode="serial" ;;
         2) target_mode="name" ;;
@@ -1333,19 +1347,29 @@ choose_computer_targets() {
             done <<< "$(printf '%s' "$input" | /usr/bin/tr ',' '\n')"
             ;;
         name-match)
-            read -r -p "   Part of the computer name to match: " input
+            read -r -p "   Part of the ${noun} name to match: " input
             target_values=("$input")
             ;;
         group)
-            choose_computer_group || return 1
+            choose_device_group || return 1
             ;;
     esac
 }
 
 # Resolve $target_mode / $target_values / $group_name on the current instance
-# into the $resolved_serials array.
+# into the $resolved_serials array. Uses computer or mobile device inventory
+# per $device_platform. The parsers accept both the v1 inventory shape
+# (general/hardware sections) and the flat mobile detail shape.
 resolve_target_serials() {
-    local cname serial out
+    local cname serial out noun="computer"
+    local -a name_cmd=(computer-inventory get) list_cmd=(computer-inventory list)
+    local -a group_cmd=(classic-computer-groups get)
+    if is_mobile_platform; then
+        noun="mobile device"
+        name_cmd=(mobile-devices detail-by-id)
+        list_cmd=(mobile-devices list)
+        group_cmd=(classic-mobile-device-groups get)
+    fi
     resolved_serials=()
     case "$target_mode" in
         serial)
@@ -1353,9 +1377,14 @@ resolve_target_serials() {
             ;;
         name)
             for cname in "${target_values[@]}"; do
-                serial=$(jc pro computer-inventory get --name "$cname" --section HARDWARE \
-                    --output json --no-hints --no-update-check --quiet 2>/dev/null \
-                    | /usr/bin/python3 -c '
+                if is_mobile_platform; then
+                    out=$(jc pro "${name_cmd[@]}" --name "$cname" \
+                        --output json --no-hints --no-update-check --quiet 2>/dev/null)
+                else
+                    out=$(jc pro "${name_cmd[@]}" --name "$cname" --section HARDWARE \
+                        --output json --no-hints --no-update-check --quiet 2>/dev/null)
+                fi
+                serial=$(printf '%s' "$out" | /usr/bin/python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -1366,18 +1395,18 @@ if isinstance(d, dict) and isinstance(d.get("results"), list):
 if isinstance(d, list):
     d = d[0] if d else {}
 if isinstance(d, dict):
-    print((d.get("hardware") or {}).get("serialNumber") or "")
+    print((d.get("hardware") or {}).get("serialNumber") or d.get("serialNumber") or "")
 ' 2>/dev/null)
                 if [[ -n "$serial" ]]; then
                     resolved_serials+=("$serial")
                 else
-                    echo "   WARNING: no computer named '$cname' found."
+                    echo "   WARNING: no ${noun} named '$cname' found."
                 fi
             done
             ;;
         name-match)
             echo "   Fetching inventory to match names containing \"${target_values[0]}\"..."
-            out=$(jc pro computer-inventory list --section GENERAL --section HARDWARE \
+            out=$(jc pro "${list_cmd[@]}" --section GENERAL --section HARDWARE \
                 --output json --no-hints --no-update-check --quiet 2>/dev/null \
                 | J_PATTERN="${target_values[0]}" /usr/bin/python3 -c '
 import json, os, sys
@@ -1390,8 +1419,9 @@ recs = data.get("results", []) if isinstance(data, dict) else data
 for r in recs if isinstance(recs, list) else []:
     if not isinstance(r, dict):
         continue
-    name = (r.get("general") or {}).get("name") or ""
-    serial = (r.get("hardware") or {}).get("serialNumber") or ""
+    general = r.get("general") or {}
+    name = general.get("name") or general.get("displayName") or r.get("name") or ""
+    serial = (r.get("hardware") or {}).get("serialNumber") or r.get("serialNumber") or ""
     if serial and pattern in name.lower():
         print(serial)
 ' 2>/dev/null)
@@ -1401,7 +1431,7 @@ for r in recs if isinstance(recs, list) else []:
             ;;
         group)
             echo "   Resolving members of group \"${group_name}\"..."
-            out=$(jc pro classic-computer-groups get --name "$group_name" \
+            out=$(jc pro "${group_cmd[@]}" --name "$group_name" \
                 --output json --no-hints --no-update-check --quiet 2>/dev/null \
                 | /usr/bin/python3 -c '
 import json, sys
@@ -1409,8 +1439,10 @@ try:
     raw = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
-grp = raw.get("computer_group", raw) if isinstance(raw, dict) else {}
-for c in grp.get("computers") or []:
+if not isinstance(raw, dict):
+    sys.exit(0)
+grp = raw.get("computer_group") or raw.get("mobile_device_group") or raw
+for c in grp.get("computers") or grp.get("mobile_devices") or []:
     if isinstance(c, dict) and c.get("serial_number"):
         print(c["serial_number"])
 ' 2>/dev/null)
@@ -1419,7 +1451,7 @@ for c in grp.get("computers") or []:
             done <<< "$out"
             ;;
     esac
-    echo "   ${#resolved_serials[@]} target computer(s)."
+    echo "   ${#resolved_serials[@]} target ${noun}(s)."
 }
 
 # Print the inventory JSON for one serial (tries upper-case first, as Jamf
@@ -1443,6 +1475,91 @@ fetch_computer_by_serial() {
         [[ "$upper" == "$serial" ]] && break
     done
     return 1
+}
+
+# Print the full mobile device detail JSON for one serial (upper-case first).
+fetch_mobile_device_by_serial() {
+    local serial="$1" upper variant out
+    upper=$(printf '%s' "$serial" | /usr/bin/tr '[:lower:]' '[:upper:]')
+    for variant in "$upper" "$serial"; do
+        out=$(jc pro mobile-devices detail-by-id --serial "$variant" \
+            --output json --no-hints --no-update-check --quiet 2>/dev/null)
+        if [[ -n "$out" && "$out" != "null" ]] \
+            && ! printf '%s' "$out" | /usr/bin/grep -q '"exitCode"'; then
+            printf '%s' "$out"
+            return 0
+        fi
+        [[ "$upper" == "$serial" ]] && break
+    done
+    return 1
+}
+
+# fetch_device_by_serial SERIAL [SECTIONS...]
+# Print inventory JSON for one computer or mobile device (per $device_platform).
+# Sections apply to computers only; mobile detail always returns everything.
+fetch_device_by_serial() {
+    if is_mobile_platform; then
+        fetch_mobile_device_by_serial "$1"
+    else
+        fetch_computer_by_serial "$@"
+    fi
+}
+
+# Read computer or mobile device inventory JSON on stdin and print one
+# normalised JSON object, so reports can treat both platforms alike:
+#   {"name", "username", "last_seen", "os_version", "model",
+#    "apps": [{"name", "id", "version"}]}
+# last_seen is last check-in for computers, last inventory update for mobile.
+# Prints nothing if the input isn't a device record.
+normalise_device_json() {
+    /usr/bin/python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if isinstance(d, dict) and isinstance(d.get("results"), list):
+    d = d["results"][0] if d["results"] else {}
+if isinstance(d, list):
+    d = d[0] if d else {}
+if not isinstance(d, dict) or not d:
+    sys.exit(0)
+
+def first(*vals):
+    for v in vals:
+        if v not in (None, ""):
+            return str(v).strip()
+    return ""
+
+g   = d.get("general") or {}
+hw  = d.get("hardware") or {}
+ul  = d.get("userAndLocation") or d.get("location") or {}
+ios = d.get("ios") or {}
+os_block = d.get("operatingSystem") or {}
+
+apps_raw = d.get("applications") or ios.get("applications") or []
+apps = []
+for a in apps_raw:
+    if not isinstance(a, dict):
+        continue
+    apps.append({
+        "name": first(a.get("name")),
+        "id": first(a.get("bundleId"), a.get("identifier")),
+        # mobile: shortVersion is the marketing version, version the build
+        "version": first(a.get("shortVersion"), a.get("version")),
+    })
+
+print(json.dumps({
+    "name": first(g.get("name"), g.get("displayName"), d.get("name")),
+    "username": first(ul.get("username"), ul.get("realname"), ul.get("realName")),
+    "last_seen": first(g.get("lastContactTime"), g.get("lastContact"), g.get("lastCheckIn"),
+                       g.get("lastInventoryUpdateDate"), d.get("lastInventoryUpdateTimestamp"),
+                       d.get("lastInventoryUpdateDate")),
+    "os_version": first(os_block.get("version"), g.get("osVersion"), d.get("osVersion")),
+    "model": first(hw.get("model"), ios.get("model"), d.get("model")),
+    "apps": apps,
+}))
+' 2>/dev/null
 }
 
 # --------------------------------------------------------------------------------
@@ -1590,13 +1707,13 @@ parse_target_arg() {
 print_target_usage() {
     echo "Target (pick one; interactive menu if omitted):"
     echo "  --serial S1 S2 ...       Explicit serial numbers"
-    echo "  --name N1 N2 ...         Exact computer names"
+    echo "  --name N1 N2 ...         Exact computer / device names"
     echo "  --name-match PATTERN     Partial name match"
-    echo "  --group GROUP_NAME       Computer group (smart or static)"
+    echo "  --group GROUP_NAME       Computer or mobile device group (smart or static)"
 }
 
 # Fail early when no target flag was given and nobody can answer the menu.
-require_computer_target() {
+require_device_target() {
     if [[ -z "$target_mode" && ( "${no_interaction:-0}" -eq 1 || ! -t 0 ) ]]; then
         echo "ERROR: specify a target via --serial, --name, --name-match, or --group."
         return 1
@@ -1606,12 +1723,68 @@ require_computer_target() {
 # Ask for targets if no flag set them, then fill $resolved_serials.
 select_target_serials() {
     if [[ -z "$target_mode" ]]; then
-        choose_computer_targets || return 1
+        choose_device_targets || return 1
     fi
     resolve_target_serials
     if [[ ${#resolved_serials[@]} -eq 0 ]]; then
-        echo "ERROR: no target computers resolved."
+        echo "ERROR: no target $(device_noun)s resolved."
         return 1
+    fi
+}
+
+# Device platform used by the target / fetch helpers: "computer" (macOS) or
+# "mobile" (iOS / iPadOS). Empty means not chosen yet, treated as computer.
+device_platform="${device_platform:-}"
+
+is_mobile_platform() {
+    [[ "$device_platform" == "mobile" ]]
+}
+
+# "computer" or "mobile device", for messages.
+device_noun() {
+    if is_mobile_platform; then echo "mobile device"; else echo "computer"; fi
+}
+
+# Short platform tag for output filenames: macos | ios
+platform_slug() {
+    if is_mobile_platform; then echo "ios"; else echo "macos"; fi
+}
+
+# Handle a --macos / --ios flag in an arg loop. Returns 1 if $1 isn't one.
+parse_platform_arg() {
+    case "$1" in
+        --macos|--mac)            device_platform="computer" ;;
+        --ios|--ipados|--mobile)  device_platform="mobile" ;;
+        *) return 1 ;;
+    esac
+}
+
+print_platform_usage() {
+    echo "Platform (menu if omitted; macOS when non-interactive):"
+    echo "  --macos                  macOS computers"
+    echo "  --ios                    iOS / iPadOS mobile devices"
+}
+
+# Ask macOS or iOS unless --macos / --ios set it (non-interactive runs default
+# to macOS). Sets $device_platform and $instance_list_type (mac | ios), so call
+# it before choose_destination_instances / choose_single_instance.
+choose_device_platform() {
+    if [[ -z "$device_platform" ]]; then
+        if [[ "${no_interaction:-0}" -eq 1 || ! -t 0 ]]; then
+            device_platform="computer"
+        else
+            choose_from_menu 1 "Device type:" "macOS computers" "iOS / iPadOS devices" || return 1
+            if [[ "$menu_choice" -eq 2 ]]; then
+                device_platform="mobile"
+            else
+                device_platform="computer"
+            fi
+        fi
+    fi
+    if is_mobile_platform; then
+        instance_list_type="ios"
+    else
+        instance_list_type="mac"
     fi
 }
 
