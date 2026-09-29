@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# Report whether specific apps are installed on target macOS computers or
-# iOS / iPadOS devices. Platform, apps and targets are chosen at runtime —
-# no hardcoded lists.
+# Report which version (if any) of specific apps is installed on target macOS
+# computers or iOS / iPadOS devices. Platform, apps and targets are chosen at
+# runtime — no hardcoded lists.
 #
 # Platform (menu if omitted):
 #   --macos | --ios
@@ -138,16 +138,25 @@ instance_short=$(url_host "$jss_instance")
 choose_output_dir || exit 1
 csv_file="${output_dir}/report-app-installs_$(platform_slug)_${instance_short}_${timestamp}.csv"
 
-# Header: Serial, Computer/Device Name, Username, one column per app
-name_col="Computer Name"
-is_mobile_platform && name_col="Device Name"
-{
-    printf 'Serial,%s,Username' "$name_col"
+# Rows are collected first and the header written last, because the app
+# column headers come from the app names actually matched on the devices.
+name_col="Computer Name"; seen_col="Last Check-in"
+if is_mobile_platform; then
+    name_col="Device Name"; seen_col="Last Inventory Update"
+fi
+rows_file=$(/usr/bin/mktemp /tmp/mjt_app_installs_rows.XXXXXX)
+names_file=$(/usr/bin/mktemp /tmp/mjt_app_installs_names.XXXXXX)
+trap 'remove_jamfcli_token; /bin/rm -f "$rows_file" "$names_file"' EXIT
+
+# blank_row SERIAL STATUS: a row with no inventory data
+blank_row() {
+    local p
+    printf '%s,%s,,' "$1" "$2"
     for p in "${app_patterns[@]}"; do
-        printf ',"%s"' "${p//\"/\"\"}"
+        printf ','
     done
     printf '\n'
-} > "$csv_file"
+}
 
 # -------------------------------------------------------------------------
 # FETCH AND PARSE
@@ -157,6 +166,8 @@ echo ""
 echo "Querying ${#resolved_serials[@]} $(device_noun)(s) on $jss_instance..."
 echo ""
 
+patterns=$(printf '%s\n' "${app_patterns[@]}")
+
 for serial in "${resolved_serials[@]}"; do
     printf "  %-14s ... " "$serial"
 
@@ -164,16 +175,11 @@ for serial in "${resolved_serials[@]}"; do
 
     if [[ -z "$raw_json" ]]; then
         echo "NOT FOUND in Jamf"
-        printf '%s,NOT FOUND,' "$serial" >> "$csv_file"
-        for p in "${app_patterns[@]}"; do
-            printf ',NOT FOUND' >> "$csv_file"
-        done
-        printf '\n' >> "$csv_file"
+        blank_row "$serial" "NOT FOUND" >> "$rows_file"
         continue
     fi
 
     inv_json=$(printf '%s' "$raw_json" | normalise_device_json)
-    patterns=$(printf '%s\n' "${app_patterns[@]}")
     row=$(printf '%s' "$inv_json" | J_PATTERNS="$patterns" J_SERIAL="$serial" /usr/bin/python3 -c '
 import csv, io, json, os, sys
 
@@ -184,33 +190,78 @@ try:
 except Exception:
     sys.exit(1)
 
-# normalise_device_json shape: name, username, apps[{name, id, version}]
+# normalise_device_json shape: name, username, last_seen_display,
+# apps[{name, id, version}]
 name     = data.get("name") or ""
 username = data.get("username") or ""
-app_keys = [(a.get("name", "") + "\n" + a.get("id", "")).lower() for a in data.get("apps") or []]
+last     = data.get("last_seen_display") or "Never"
+apps     = data.get("apps") or []
 
-results = ["Installed" if any(p in k for k in app_keys) else "Not Installed" for p in patterns]
+def display_name(n):
+    return n[:-4] if n.lower().endswith(".app") else n
 
-# Line 1: console summary. Line 2: finished CSV row.
-print("%s (%s, user: %s)" % (" | ".join(results), name, username or "unknown"))
+cells, matched_names, summary = [], [], []
+for p in patterns:
+    versions, names = [], []
+    for a in apps:
+        if p in a.get("name", "").lower() or p in a.get("id", "").lower():
+            v = a.get("version", "")
+            if v and v not in versions:
+                versions.append(v)
+            n = display_name(a.get("name", "")) or a.get("id", "")
+            if n and n not in names:
+                names.append(n)
+    if names:
+        cell = " / ".join(versions) or "Installed"
+    else:
+        cell = "Not Installed"
+    cells.append(cell)
+    matched_names.append(names)
+    summary.append("%s: %s" % (" / ".join(names) or p, cell))
+
+# Line 1: console summary. Line 2: CSV row. Line 3: matched app names per pattern.
+print("%s (%s, user: %s, last seen %s)" % (" | ".join(summary), name, username or "unknown", last))
 buf = io.StringIO()
-csv.writer(buf, lineterminator="").writerow([os.environ.get("J_SERIAL", ""), name, username] + results)
+csv.writer(buf, lineterminator="").writerow([os.environ.get("J_SERIAL", ""), name, username, last] + cells)
 print(buf.getvalue())
+print(json.dumps(matched_names))
 ' 2>/dev/null)
 
     if [[ -z "$row" ]]; then
         echo "PARSE ERROR"
-        printf '%s,PARSE ERROR,' "$serial" >> "$csv_file"
-        for p in "${app_patterns[@]}"; do
-            printf ',' >> "$csv_file"
-        done
-        printf '\n' >> "$csv_file"
+        blank_row "$serial" "PARSE ERROR" >> "$rows_file"
         continue
     fi
 
     printf '%s\n' "${row%%$'\n'*}"
-    printf '%s\n' "${row#*$'\n'}" >> "$csv_file"
+    row="${row#*$'\n'}"
+    printf '%s\n' "${row%%$'\n'*}" >> "$rows_file"
+    printf '%s\n' "${row#*$'\n'}" >> "$names_file"
 done
+
+# Header: each app column is named after the app(s) it matched (without
+# ".app"), falling back to the typed pattern when nothing matched.
+J_PATTERNS="$patterns" /usr/bin/python3 - "$names_file" "$name_col" "$seen_col" > "$csv_file" <<'PY'
+import csv, json, os, sys
+
+names_file, name_col, seen_col = sys.argv[1:4]
+patterns = [p for p in os.environ.get("J_PATTERNS", "").split("\n") if p]
+seen = [[] for _ in patterns]
+with open(names_file) as fh:
+    for line in fh:
+        try:
+            per_pattern = json.loads(line)
+        except Exception:
+            continue
+        for i, names in enumerate(per_pattern[:len(patterns)]):
+            for n in names:
+                if n not in seen[i]:
+                    seen[i].append(n)
+headers = [" / ".join(s) if s else p for s, p in zip(seen, patterns)]
+csv.writer(sys.stdout, lineterminator="\n").writerow(
+    ["Serial", name_col, "Username", seen_col] + headers)
+PY
+/bin/cat "$rows_file" >> "$csv_file"
 
 echo ""
 echo "Done. CSV written to:"
