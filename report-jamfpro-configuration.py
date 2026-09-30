@@ -188,7 +188,7 @@ def _setup_jamfcli_profile_if_needed(_run, warn, ok, hdr, GREEN, YELLOW, RED, BO
         ok(f"Default profile set to '{profile_name}'.")
 
     print(file=sys.stderr)
-    ok(f"Ready. Run with:  python3 jamfmsp-settings-export.py --profile {profile_name}")
+    ok(f"Ready. Run with:  python3 report-jamfpro-configuration.py --profile {profile_name}")
     print(file=sys.stderr)
 
     # Inject the profile into argv so this run continues without re-prompting
@@ -283,6 +283,29 @@ def _check_dependencies() -> None:
 
     # ── All good — check profiles and return ─────────────────────────────────
     if not anything_missing:
+        # Probe that every flag in _JAMFCLI_QUIET_FLAGS (~line 1230) is
+        # recognised by the installed jamf-cli binary. An unknown flag causes
+        # Cobra to exit non-zero; run_cmd_maybe converts that to "" silently,
+        # so a version mismatch would produce a workbook of blank sheets with
+        # no error anywhere. Fail loudly here instead.
+        # Keep this list in sync with _JAMFCLI_QUIET_FLAGS.
+        _quiet_flags_probe = [
+            "--no-update-check",
+            "--no-version-check",
+            "--no-hints",
+            "--no-input",
+        ]
+        _probe = _run(
+            ["jamf-cli"] + _quiet_flags_probe + ["--help"],
+            capture_output=True,
+        )
+        if _probe.returncode != 0:
+            print(file=sys.stderr)
+            err("jamf-cli does not support one or more startup flags: "
+                + " ".join(_quiet_flags_probe))
+            err("Update jamf-cli (brew upgrade jamf-cli), or remove the "
+                "unsupported flags from _JAMFCLI_QUIET_FLAGS (~line 1230).")
+            sys.exit(1)
         _setup_jamfcli_profile_if_needed(
             _run, warn, ok, hdr, GREEN, YELLOW, RED, BOLD, NC
         )
@@ -503,7 +526,7 @@ import zipfile
 
 
 # ── MJT auth bridge ──────────────────────────────────────────────────────────
-# When invoked via report-jamf-settings.sh the shell wrapper supplies --url and
+# When invoked via report-jamfpro-configuration.sh the shell wrapper supplies --url and
 # --token-file, bypassing jamf-cli's profile picker entirely.
 _OVERRIDE_URL: "str | None" = None
 _OVERRIDE_TOKEN_FILE: "str | None" = None
@@ -1213,7 +1236,47 @@ def _section_done(name: str, count: int) -> None:
 
 
 
+# Global jamf-cli flags appended to every non-interactive read this script
+# makes. A full export spawns hundreds of jamf-cli processes and each one
+# would otherwise run a daily release check and a tenant version
+# compatibility check before doing any work. These all write to stderr, so
+# suppressing them changes nothing about the parsed stdout.
+#
+#   --no-update-check   skip the daily "newer jamf-cli available" check
+#   --no-version-check  skip the tenant version compatibility check
+#   --no-hints          suppress advisory hints (e.g. large-result tips)
+#   --no-input          never prompt; fail instead of blocking forever
+#
+# --no-input is safe here specifically because run_cmd / run_cmd_maybe are
+# only ever used for machine reads. The interactive profile setup path uses
+# its own `_run` wrapper and is deliberately left alone.
+_JAMFCLI_QUIET_FLAGS = [
+    "--no-update-check",
+    "--no-version-check",
+    "--no-hints",
+    "--no-input",
+]
+
+
+def _with_quiet_flags(cmd: list[str]) -> list[str]:
+    """Append the startup-check suppression flags to a jamf-cli command.
+
+    No-ops for any command that isn't jamf-cli, and never appends a flag
+    that the caller already set.
+    """
+    if not cmd:
+        return cmd
+    if "jamf-cli" not in str(cmd[0]):
+        return cmd
+    out = list(cmd)
+    for flag in _JAMFCLI_QUIET_FLAGS:
+        if flag not in out:
+            out.append(flag)
+    return out
+
+
 def run_cmd(cmd: list[str]) -> str:
+    cmd = _with_quiet_flags(cmd)
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         stderr = (proc.stderr or "").strip()
@@ -1224,10 +1287,53 @@ def run_cmd(cmd: list[str]) -> str:
 
 
 def run_cmd_maybe(cmd: list[str]) -> str:
+    cmd = _with_quiet_flags(cmd)
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         return ""
     return proc.stdout
+
+
+def _lazy_raw_xml(fetch, *args):
+    """Return a memoised zero-arg callable that fetches raw XML on first use.
+
+    The Classic API detail helpers (`extract_scope_groups`,
+    `extract_policy_scripts`, `extract_mac_app_scope`) all read the JSON
+    response first and only fall back to raw XML when the JSON path yields
+    nothing. That fallback is rare, but the loops used to fetch the raw XML
+    eagerly for every single item, doubling the API calls for the whole
+    export. Passing one of these callables instead defers the fetch until a
+    fallback actually needs it, and memoises it so multiple fallbacks in the
+    same iteration still cost at most one call.
+
+    The helpers resolve it via `_resolve_raw_xml`, so they continue to accept
+    a plain string from any caller that already has the XML in hand (the
+    config-profile loop, which needs it unconditionally for the payload
+    plist).
+    """
+    box: list[str] = []
+
+    def _get() -> str:
+        if not box:
+            box.append(fetch(*args) or "")
+        return box[0]
+
+    return _get
+
+
+def _resolve_raw_xml(raw_xml: Any) -> str:
+    """Coerce a raw-XML argument to a string.
+
+    Accepts either an XML string or a zero-arg callable returning one (see
+    `_lazy_raw_xml`). Failures degrade to an empty string so the JSON-only
+    result stands rather than aborting the export.
+    """
+    if callable(raw_xml):
+        try:
+            return raw_xml() or ""
+        except Exception:
+            return ""
+    return raw_xml or ""
 
 
 def parse_json(s: str) -> Any:
@@ -1561,14 +1667,24 @@ def get_policy_raw_xml(policy_id: int, profile_name: str | None) -> str:
 def get_policy_scope_json(policy_id: int, profile_name: str | None) -> dict[str, Any]:
     """Return the scope subtree from a policy's full JSON.
 
-    Implementation note: we deliberately do NOT use `pro classic-policies
-    scope get <id>`. That subcommand only resolves policies by NAME (hits
+    NOT CALLED by the policy loop any more, and kept only so the reasoning
+    below does not get lost. Because the workaround described here fetches the
+    entire policy record, this function issued a command byte-identical to
+    `get_policy_json` and then threw away everything except `["scope"]`. That
+    made every policy cost two identical API calls. The loop now reads
+    `pjson["scope"]` directly. Do not reintroduce a call to this from any hot
+    path; if you need a policy's scope, you almost certainly already have the
+    full record in hand.
+
+    Implementation note (still true, and the reason `scope get` is unusable):
+    we deliberately do NOT use `pro classic-policies scope get <id>`. That
+    subcommand only resolves policies by NAME (hits
     `/JSSResource/policies/name/<arg>`) and there is no flag to force by-id
-    lookup — so when called with a numeric ID it 404s for every policy
-    whose literal name isn't that number. This silently broke every macOS
-    policy scope fetch on tenants where IDs and names never match (i.e.
-    every real tenant). Calling `classic-policies get <id>` works with
-    positional ID, and the response already contains the `scope` subtree.
+    lookup, so when called with a numeric ID it 404s for every policy whose
+    literal name isn't that number. This silently broke every macOS policy
+    scope fetch on tenants where IDs and names never match (i.e. every real
+    tenant). Calling `classic-policies get <id>` works with positional ID, and
+    the response already contains the `scope` subtree.
     """
     cmd = ["jamf-cli", "pro", "classic-policies", "get",
            str(policy_id), "--output", "json"]
@@ -1965,14 +2081,15 @@ OLLAMA_EMBED_TIMEOUT = 10  # seconds per embedding request
 # prompt template itself changes (e.g. you tweak wording in _ollama_describe_*
 # below), bump _OLLAMA_CACHE_VERSION to invalidate every entry at once.
 #
-# Cache file: ~/.cache/jamfmsp-settings-export/ollama.sqlite (XDG-compliant).
+# Cache file: ~/.cache/report-jamfpro-configuration/ollama.sqlite (XDG-compliant),
+# created the first time Ollama is used.
 # Safe to delete by hand at any time — the next run rebuilds entries lazily.
 #
 # Empty / falsy results are NOT cached so failures (Ollama down, timeout)
 # don't poison the cache and prevent retries.
 # ─────────────────────────────────────────────────────────────────────────────
 _OLLAMA_CACHE_VERSION = 1  # ← bump when ANY _ollama_describe_* prompt changes
-_OLLAMA_CACHE_PATH = pathlib.Path.home() / ".cache" / "jamfmsp-settings-export" / "ollama.sqlite"
+_OLLAMA_CACHE_PATH = pathlib.Path.home() / ".cache" / "report-jamfpro-configuration" / "ollama.sqlite"
 
 
 class _OllamaCache:
@@ -1989,6 +2106,15 @@ class _OllamaCache:
         self.misses = 0
         self.disabled = False
         self.conn = None
+
+    def _connect(self) -> bool:
+        """Open the cache on first use, so runs without Ollama never create
+        the cache folder. Returns False if the cache is unavailable."""
+        if self.conn:
+            return True
+        if self.disabled:
+            return False
+        path = self.path
         try:
             import sqlite3
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -2007,6 +2133,8 @@ class _OllamaCache:
             print(f"WARNING: Ollama cache unavailable ({e}); "
                   f"continuing without caching.", file=sys.stderr)
             self.disabled = True
+            return False
+        return True
 
     def _key(self, kind: str, model: str, payload: str) -> str:
         import hashlib
@@ -2019,7 +2147,7 @@ class _OllamaCache:
 
     def get(self, kind: str, model: str, payload: str) -> str | None:
         """Returns the cached summary or None on miss. Bumps hit counter."""
-        if self.disabled or not self.conn:
+        if not self._connect():
             return None
         try:
             cur = self.conn.execute(
@@ -2036,7 +2164,7 @@ class _OllamaCache:
 
     def set(self, kind: str, model: str, payload: str, summary: str) -> None:
         """Store a summary. Refuses to cache empty/falsy values."""
-        if self.disabled or not self.conn or not summary:
+        if not summary or not self._connect():
             return
         try:
             import time as _t
@@ -2899,11 +3027,14 @@ def _summarise_script(body: str, notes: str = "") -> str:
     return f"{lang} script ({len(lines)} lines)"
 
 
-def extract_policy_scripts(policy_json: dict[str, Any], raw_xml: str) -> list[dict[str, Any]]:
+def extract_policy_scripts(policy_json: dict[str, Any], raw_xml: Any) -> list[dict[str, Any]]:
     """Return scripts attached to a Classic policy.
 
     Each entry: {id, name, priority, parameters: [p4..p11]}.
     Reads from JSON first; falls back to raw XML if JSON omits the section.
+
+    `raw_xml` may be an XML string or a zero-arg callable returning one (see
+    _lazy_raw_xml). It is resolved only if the JSON path yields nothing.
     Handles the Classic API's habit of serialising a single-item collection as
     either a dict or a one-element list.
     """
@@ -2948,6 +3079,10 @@ def extract_policy_scripts(policy_json: dict[str, Any], raw_xml: str) -> list[di
         return rows
 
     # ── XML fallback ───────────────────────────────────────────────────────
+    # raw_xml may be a lazy callable (see _lazy_raw_xml); resolving it here,
+    # after the JSON path has already failed, is what keeps the eager fetch
+    # out of the hot loop.
+    raw_xml = _resolve_raw_xml(raw_xml)
     if raw_xml and raw_xml.strip():
         try:
             root = ET.fromstring(raw_xml)
@@ -3715,8 +3850,11 @@ def lookup_msu_remediation(error_text: str) -> str | None:
     return None
 
 
-def extract_mac_app_scope(scope_json: dict[str, Any], raw_xml: str) -> tuple[list[str], list[str], list[str]]:
+def extract_mac_app_scope(scope_json: dict[str, Any], raw_xml: Any) -> tuple[list[str], list[str], list[str]]:
     """Extract target / limitation / exclusion computer groups from a mac_application scope.
+
+    `raw_xml` may be an XML string or a zero-arg callable returning one (see
+    _lazy_raw_xml). It is resolved only if the JSON walk yields nothing.
 
     Falls back to raw XML when the scope endpoint returns no group names.
     The XML path for mac_application scope is identical to os_x_configuration_profile.
@@ -3787,7 +3925,14 @@ def extract_mac_app_scope(scope_json: dict[str, Any], raw_xml: str) -> tuple[lis
     if scope_json:
         walk(scope_json)
 
-    if not targets and not limitations and not exclusions and raw_xml.strip():
+    # raw_xml may be a lazy callable (see _lazy_raw_xml). It is resolved only
+    # inside this branch, i.e. once the JSON walk has come up empty, so a
+    # policy or app whose JSON carried its scope never pays for the fetch.
+    if not targets and not limitations and not exclusions:
+        raw_xml = _resolve_raw_xml(raw_xml)
+    else:
+        raw_xml = ""
+    if raw_xml.strip():
         try:
             root = ET.fromstring(raw_xml)
             for cg in root.findall(".//scope/computer_groups/computer_group/name"):
@@ -3843,6 +3988,12 @@ def get_profile_raw_xml(profile_id: int, profile_name: str | None) -> str:
 
 def get_profile_scope_json(profile_id: int, profile_name: str | None) -> dict[str, Any]:
     """Return the scope subtree from a macOS config profile's full JSON.
+
+    NOT CALLED by the config-profile loop any more, for the same reason as
+    get_policy_scope_json: the workaround below fetches the whole profile
+    record, making this command byte-identical to `get_profile_json` and so a
+    duplicate API call per profile. The loop now reads `profile_json["scope"]`
+    directly. Kept for the note below.
 
     Same broken-by-design issue as get_policy_scope_json: the dedicated
     `classic-macos-config-profiles scope get <id>` subcommand hits the
@@ -3947,7 +4098,13 @@ def short_key_from_path(key_path: str) -> str:
     return token
 
 
-def extract_scope_groups(scope_json: dict[str, Any], raw_xml: str) -> tuple[list[str], list[str], list[str]]:
+def extract_scope_groups(scope_json: dict[str, Any], raw_xml: Any) -> tuple[list[str], list[str], list[str]]:
+    """Extract target / limitation / exclusion computer groups from a scope block.
+
+    `raw_xml` may be an XML string or a zero-arg callable returning one (see
+    _lazy_raw_xml). It is resolved only if the JSON walk yields nothing, which
+    is what lets the policy loop avoid fetching XML it will never read.
+    """
     targets: list[str] = []
     limitations: list[str] = []
     exclusions: list[str] = []
@@ -3990,7 +4147,14 @@ def extract_scope_groups(scope_json: dict[str, Any], raw_xml: str) -> tuple[list
         walk_scope(scope_json)
 
     # Fallback to raw XML if scope endpoint did not provide names.
-    if (not targets and not limitations and not exclusions) and raw_xml.strip():
+    # raw_xml may be a lazy callable (see _lazy_raw_xml). It is resolved only
+    # inside this branch, so items whose JSON already carried their scope
+    # never trigger the extra fetch.
+    if not targets and not limitations and not exclusions:
+        raw_xml = _resolve_raw_xml(raw_xml)
+    else:
+        raw_xml = ""
+    if raw_xml.strip():
         try:
             root = ET.fromstring(raw_xml)
             for cg in root.findall(".//scope/computer_groups/computer_group/name"):
@@ -4186,20 +4350,6 @@ DATASETS = {
 }
 
 
-_BANNER = r"""
-                            ___      ____                                   __
- __                       /'___\    /\  _`\                                /\ \__
-/\_\     __      ___ ___ /\ \__/    \ \ \L\ \     __   _____     ___   _ __\ \ ,_\    __   _ __
-\/\ \  /'__`\  /' __` __`\ \ ,__\    \ \ ,  /   /'__`\/\ '__`\  / __`\/\`'__\ \ \/  /'__`\/\`'__\
- \ \ \/\ \L\.\_/\ \/\ \/\ \ \ \_/     \ \ \\ \ /\  __/\ \ \L\ \/\ \L\ \ \ \/ \ \ \_/\  __/\ \ \/
- _\ \ \ \__/.\_\ \_\ \_\ \_\ \_\       \ \_\ \_\ \____\\ \ ,__/\ \____/\ \_\  \ \__\ \____\\ \_\
-/\ \_\ \/__/\/_/\/_/\/_/\/_/\/_/        \/_/\/ /\/____/ \ \ \/  \/___/  \/_/   \/__/\/____/ \/_/
-\ \____/                                                  \ \_\
- \/___/                                                    \/_/
-"""
-
-_banner_shown = False
-
 # ── UI styling helpers ───────────────────────────────────────────────────────
 # Mirrors the visual language of Launcher.command — blue horizontal rules,
 # coloured section headers, and " N │ Item" menu lines. Colours collapse to
@@ -4235,35 +4385,8 @@ def _ui_menu_line(num: object, label: str, suffix: str = "") -> None:
     print(f" {num_s} {_UI_BLUE}│{_UI_NC} {label}{suffix}")
 
 
-def _print_banner() -> None:
-    global _banner_shown
-    if _banner_shown:
-        return
-    _banner_shown = True
-    print(_BANNER)
-
-
-def _prompt_format() -> str:
-    """Interactively ask which output format to use."""
-    _print_banner()
-    _ui_section("Output Format")
-    print()
-    _ui_menu_line(1, "Excel workbook (.xlsx)", f"  {_UI_DIM}[default]{_UI_NC}")
-    _ui_menu_line(2, "CSV files")
-    print()
-    _ui_hbar()
-    # Terminal table is intentionally not offered here — it remains available
-    # via `--format terminal` for scripted/debug use, just not in the prompt.
-    choice = input("  Choose [1/2] (default: 1): ").strip()
-    return {
-        "": FMT_XLSX, "1": FMT_XLSX,
-        "2": FMT_CSV,
-    }.get(choice, FMT_XLSX)
-
-
 def _prompt_dataset() -> str:
     """Interactively ask which dataset to display in the terminal."""
-    _print_banner()
     _ui_section("Terminal Dataset")
     print()
     for key, (label, _) in DATASETS.items():
@@ -4305,7 +4428,6 @@ def _prompt_profile() -> str | None:
     # Sort with the default first so option 1 is the "do what I usually do" choice.
     names.sort(key=lambda n: (n != default_name, n.lower()))
 
-    _print_banner()
     _ui_section("Choose a jamf-cli profile")
     print()
     for i, n in enumerate(names, 1):
@@ -4364,7 +4486,6 @@ def _resolve_instances(preselected: str | None) -> list[str | None]:
     if not sys.stdin.isatty():
         return [None]
 
-    _print_banner()
     try:
         import os as _os
         _lib = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "lib")
@@ -4428,7 +4549,6 @@ def _prompt_sheet_selection() -> set[str]:
     Returns a set of sheet display-names. Empty input / Enter = all sheets.
     Accepts comma-separated numbers, ranges (e.g. 1-5), or 'all'.
     """
-    _print_banner()
     _ui_section("Workbook Sheets")
     print()
     # Group lines visually by family. Family is inferred from the display
@@ -4491,7 +4611,7 @@ def main() -> int:
     parser.add_argument("--name-pattern", help="Glob pattern for profile names", default="")
     parser.add_argument(
         "--output-prefix",
-        help="Output directory/stem. Defaults to <output-dir>/<profile>-jamfmsp-settings",
+        help="Output directory/stem. Defaults to <output-dir>/<profile>-jamfpro-configuration",
         default="",
     )
     parser.add_argument(
@@ -4537,7 +4657,7 @@ def main() -> int:
     # bypassing this block on the second pass.
     if args.url is None and args.token_file is None:
         _wrapper = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "report-jamf-settings.sh"
+            os.path.dirname(os.path.abspath(__file__)), "report-jamfpro-configuration.sh"
         )
         if os.path.exists(_wrapper):
             os.execv("/bin/bash", ["/bin/bash", _wrapper] + sys.argv[1:])
@@ -4559,13 +4679,8 @@ def main() -> int:
         # shared across every instance.
         _instances = _resolve_instances(args.profile)
 
-    # ── Resolve output format (flag → interactive prompt) ────────────────────
-    fmt = args.fmt
-    if fmt is None:
-        if sys.stdin.isatty():
-            fmt = _prompt_format()
-        else:
-            fmt = FMT_XLSX  # non-interactive default
+    # ── Resolve output format: Excel unless --format says otherwise ──────────
+    fmt = args.fmt or FMT_XLSX
 
     # ── For terminal mode, resolve dataset before any expensive fetches ──────
     terminal_dataset: str | None = None
@@ -4754,10 +4869,10 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
     else:
         # Convention aligned with the .command toolkit:
         #   <output-dir>/<profile>-<slug>-<YYYYMMDD>.<ext>
-        # Slug is "jamfmsp-settings" — this exporter covers both macOS and
-        # iOS now, so the generic Jamf MSP name fits better than "macos-".
+        # Slug is "jamfpro-configuration" — this exporter covers both macOS
+        # and iOS, so a platform-neutral name fits better than "macos-".
         out_dir = pathlib.Path(args.output_dir or "/tmp").expanduser()
-        prefix = out_dir / f"{safe_profile}-jamfmsp-settings"
+        prefix = out_dir / f"{safe_profile}-jamfpro-configuration"
 
     # Filename convention: <profile>-<slug>-<YYYYMMDD>.<ext>
     datestamp = datetime.now().strftime("%Y%m%d")
@@ -4898,9 +5013,18 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
         fallback_name = p["name"]
         _progress(_pi, len(_profile_items), fallback_name)
 
+        # Two API calls per profile, not three. The scope subtree is already
+        # part of the full profile record, so it comes off profile_json rather
+        # than from a second identical fetch (see get_profile_scope_json).
+        #
+        # Unlike the policy and mac-app loops, the raw XML stays EAGER here:
+        # get_payload_xml_string() needs it unconditionally to pull the
+        # payload plist out of <payloads>, so there is nothing to defer.
         profile_json = get_profile_json(pid, args.profile)
         raw_xml = get_profile_raw_xml(pid, args.profile)
-        scope_json = get_profile_scope_json(pid, args.profile)
+        scope_json = profile_json.get("scope") if isinstance(profile_json, dict) else None
+        if not isinstance(scope_json, dict):
+            scope_json = {}
 
         profile_name = profile_name_from_json(profile_json, fallback_name)
         profile_category = category_from_json(profile_json)
@@ -5170,9 +5294,19 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
 
         fallback_name = str(p.get("name") or f"Policy {pid}")
         _progress(_pi, len(policies), fallback_name)
+        # One API call per policy, not three.
+        #
+        # `get_policy_json` already returns the whole policy record, scope
+        # subtree included, so the scope comes straight off pjson rather than
+        # from a second identical fetch. And the raw XML is only ever needed
+        # as a fallback when the JSON path yields nothing, so it goes behind a
+        # memoised lazy callable instead of being fetched up front. See
+        # _lazy_raw_xml and get_policy_scope_json for the history.
         pjson = get_policy_json(pid, args.profile)
-        pxml = get_policy_raw_xml(pid, args.profile)
-        pscope = get_policy_scope_json(pid, args.profile)
+        pxml = _lazy_raw_xml(get_policy_raw_xml, pid, args.profile)
+        pscope = pjson.get("scope") if isinstance(pjson, dict) else None
+        if not isinstance(pscope, dict):
+            pscope = {}
         pname = policy_name_from_json(pjson, fallback_name)
 
         # ── Orphan capture — done BEFORE the name filter below ───────────────
@@ -5546,8 +5680,12 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
                 continue
         _progress(_ai, len(mac_app_list), str(entry.get("name") or ""))
 
+        # One API call per app, not two. The raw XML is only consumed by
+        # extract_mac_app_scope()'s fallback branch, which fires only when the
+        # JSON scope walk finds nothing, so it goes behind a memoised lazy
+        # callable (see _lazy_raw_xml).
         app_json = get_mac_app_json(app_id, args.profile)
-        raw_xml = get_mac_app_raw_xml(app_id, args.profile)
+        raw_xml = _lazy_raw_xml(get_mac_app_raw_xml, app_id, args.profile)
         scope_json = app_json.get("scope", {}) if isinstance(app_json, dict) else {}
         general = app_json.get("general", {}) if isinstance(app_json, dict) else {}
 
@@ -8914,7 +9052,7 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
             pass
 
     elif fmt == FMT_CSV:
-        # Output folder: <prefix>-<YYYYMMDD>/ (e.g. /tmp/<profile>-jamfmsp-settings-<YYYYMMDD>/)
+        # Output folder: <prefix>-<YYYYMMDD>/ (e.g. /tmp/<profile>-jamfpro-configuration-<YYYYMMDD>/)
         # Convention matches the .command toolkit; the subfolder contains one
         # CSV per sheet so the output folder doesn't get cluttered with 10+ files per run.
         csv_dir = prefix.with_name(f"{prefix.name}-{datestamp}")
