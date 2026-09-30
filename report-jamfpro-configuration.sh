@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # --------------------------------------------------------------------------------
-# MJT wrapper for report-jamf-settings.py
+# MJT wrapper for report-jamfpro-configuration.py
 # Handles instance selection and Keychain auth, then invokes the Python script
 # with --url and --token-file so it bypasses jamf-cli's profile picker.
 # --------------------------------------------------------------------------------
@@ -20,9 +20,9 @@ if [[ ! -d "${this_script_dir}" ]]; then
     exit 1
 fi
 
-python_script="$DIR/report-jamf-settings.py"
+python_script="$DIR/report-jamfpro-configuration.py"
 if [[ ! -f "$python_script" ]]; then
-    echo "ERROR: report-jamf-settings.py not found alongside this script."
+    echo "ERROR: report-jamfpro-configuration.py not found alongside this script."
     exit 1
 fi
 
@@ -56,8 +56,8 @@ while [[ "$#" -gt 0 ]]; do
             echo "  --id | --client-id CLIENT_ID     use specified client ID"
             echo "  -o  | --output-dir DIR           output folder (prompts /tmp or ~/Desktop if omitted)"
             echo ""
-            echo "All other flags are forwarded to report-jamf-settings.py."
-            echo "Run: python3 report-jamf-settings.py --help  for the full list (needs Python 3.10+)."
+            echo "All other flags are forwarded to report-jamfpro-configuration.py."
+            echo "Run: python3 report-jamfpro-configuration.py --help  for the full list (needs Python 3.10+)."
             exit 0
             ;;
         *) forward_args+=("$1") ;;
@@ -87,7 +87,7 @@ trap remove_jamfcli_token EXIT
 
 for jss_instance in "${instance_choice_array[@]}"; do
     echo ""
-    echo "Running report-jamf-settings on $jss_instance ..."
+    echo "Running report-jamfpro-configuration on $jss_instance ..."
 
     if ! token_for_instance "$jss_instance"; then
         echo "ERROR: could not obtain token for $jss_instance"

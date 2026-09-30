@@ -57,6 +57,8 @@ installed_only=""
 list_apps_only=0
 output_dir=""
 debug=0
+# above this many targets, fetch all inventory once rather than per device
+bulk_fetch_threshold=20
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
@@ -161,6 +163,25 @@ for line in sys.stdin:
             ;;
         *)
             resolve_target_serials
+            # past a handful of devices, one bulk inventory fetch filtered to
+            # the targets beats a lookup per device by a wide margin
+            if [[ ${#resolved_serials[@]} -gt $bulk_fetch_threshold ]]; then
+                echo "   Fetching $(device_noun) inventory for ${#resolved_serials[@]} target(s)..."
+                raw_file="${work_dir}/inventory.json"
+                fetch_inventory_list "${sections[@]}" > "$raw_file"
+                normalise_device_list < "$raw_file" \
+                    | J_SERIALS=$(printf '%s\n' "${resolved_serials[@]}") /usr/bin/python3 -c '
+import json, os, sys
+wanted = [s for s in os.environ.get("J_SERIALS", "").split("\n") if s]
+found = {}
+for line in sys.stdin:
+    r = json.loads(line)
+    found.setdefault(r.get("serial", "").upper(), line.rstrip("\n"))
+for s in wanted:
+    print(found.get(s.upper()) or json.dumps({"serial": s, "missing": True}))
+' > "$records_file"
+                return
+            fi
             for serial in "${resolved_serials[@]}"; do
                 n=$((n + 1))
                 printf '\r   Fetching inventory: %d of %d' "$n" "${#resolved_serials[@]}"

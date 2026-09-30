@@ -1618,14 +1618,21 @@ for r in recs:
 # Print the whole computer or mobile device inventory (per $device_platform)
 # as one JSON document. Can be slow on large fleets.
 fetch_inventory_list() {
-    local section cmd="computer-inventory"
+    local section out cmd="computer-inventory"
     local -a section_args=()
     is_mobile_platform && cmd="mobile-devices"
     for section in "$@"; do
         section_args+=(--section "$section")
     done
-    jc pro "$cmd" list "${section_args[@]}" \
-        --output json --no-hints --no-update-check --quiet 2>/dev/null
+    # large pages mean a handful of requests instead of one per 100 devices;
+    # retry at the default size if the server rejects the page size
+    out=$(jc pro "$cmd" list "${section_args[@]}" --page-size "${inventory_page_size:-2000}" \
+        --output json --no-hints --no-update-check --no-version-check --quiet 2>/dev/null)
+    if [[ -z "$out" ]]; then
+        out=$(jc pro "$cmd" list "${section_args[@]}" \
+            --output json --no-hints --no-update-check --no-version-check --quiet 2>/dev/null)
+    fi
+    printf '%s\n' "$out"
 }
 
 # --------------------------------------------------------------------------------
