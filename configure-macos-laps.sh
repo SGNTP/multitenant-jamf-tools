@@ -103,17 +103,18 @@ Steps 9-10 (AutoPkg re-enrol policy):
 --recipe-repo DIR                  - msp-internal-recipes checkout (default: $MSP_RECIPES_PATH,
                                      else /Users/Shared/msp-internal-recipes)
 
-Instances:
--il | --instance-list FILENAME     - instance-list filename (without .txt)
--i  | --instance JSS_URL           - a single instance (repeatable)
--a  | --all                        - all instances in the list
---user | --client-id CLIENT_ID     - client ID / username to use
--x  | --nointeraction              - run without interaction (implies --yes)
-
 Other:
 -n  | --dry-run                    - show what would change; write nothing
 -y  | --yes                        - assume yes to all prompts (non-interactive)
+
+MJT flags:
+-il | --instance-list FILENAME     - instance-list filename (without .txt)
+-i  | --instance URL               - a single instance (repeatable)
+-a  | --all-instances              - all instances in the list
+--id | --client-id CLIENT_ID       - client ID / username to use
+-x  | --nointeraction              - run without interaction (implies --yes)
 -v  | --verbose                    - verbose curl / jamf-cli output
+-j  | --jamf-cli PATH              - jamf-cli binary to use
 -h  | --help                       - this help
 
 Examples:
@@ -153,6 +154,18 @@ human_duration() {
     elif (( s % 3600  == 0 && s > 0 )); then printf '%ss (%dh)' "${s}" $(( s / 3600 ))
     elif (( s % 60    == 0 && s > 0 )); then printf '%ss (%dm)' "${s}" $(( s / 60 ))
     else printf '%ss' "${s}"; fi
+}
+
+# True if $1 is a jamf-cli error document ({"error": ..., "exitCode": ...}).
+is_cli_error() {
+    printf '%s' "${1}" | /usr/bin/python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+sys.exit(0 if isinstance(d, dict) and "error" in d and "exitCode" in d else 1)
+' 2>/dev/null
 }
 
 # dim breadcrumb showing where this setting lives in Jamf Pro
@@ -228,36 +241,39 @@ resolve_uie_username() {
     echo
 }
 
-# numbered single-choice menu. $1 title, $2 outvar name, then "value|Label" pairs.
+# Single-choice menu over "value|Label" pairs via choose_from_menu. The entry
+# whose value is $3 is the default and is marked "(current)"; if none matches,
+# the entry whose value is $4 is the default.
+# $1 title, $2 outvar name, $3 current value, $4 fallback value, then the pairs.
 pick_value() {
-    local title="${1}" outvar="${2}"; shift 2
-    local pairs=("$@") i val lab sel
-    echo
-    echo "  ${title}:"
+    local title="${1}" outvar="${2}" current="${3}" fallback="${4}"; shift 4
+    local pairs=("$@") labels=() i def="" fb=""
     for i in "${!pairs[@]}"; do
-        lab="${pairs[$i]#*|}"
-        printf "     [%s] %s\n" "$i" "${lab}"
+        if [[ "${pairs[$i]%%|*}" == "${current}" ]]; then
+            labels+=("${pairs[$i]#*|} (current)"); def=$(( i + 1 ))
+        else
+            labels+=("${pairs[$i]#*|}")
+        fi
+        [[ "${pairs[$i]%%|*}" == "${fallback}" ]] && fb=$(( i + 1 ))
     done
-    echo
-    read -r -p "     Choose by number: " sel
-    if [[ "${sel}" =~ ^[0-9]+$ ]] && [[ -n "${pairs[$sel]:-}" ]]; then
-        val="${pairs[$sel]%%|*}"
-        printf -v "${outvar}" '%s' "${val}"
-        return 0
-    fi
-    return 1
+    choose_from_menu "${def:-$fb}" "${title}:" "${labels[@]}" || return 1
+    printf -v "${outvar}" '%s' "${pairs[$((menu_choice - 1))]%%|*}"
 }
 
-# Interactive numbered menus for the Step 2 values (only those not set by flag).
+# Interactive menus for the Step 2 values (only those not set by flag).
+# $1 current autoRotateEnabled, $2 current expiry, $3 current passwordRotationTime.
 choose_laps_settings() {
     [[ -t 0 && $assume_yes -eq 0 ]] || return 0
+    local cur_interval="never"
+    [[ "${1}" == "true" ]] && cur_interval="${2}"
 
-    [[ -z "${rotation_interval}" ]] && pick_value "Rotation interval" rotation_interval \
+    [[ -z "${rotation_interval}" ]] && pick_value "Rotation interval" rotation_interval "${cur_interval}" never \
         "never|Never" "604800|7 days" "2592000|30 days" "7776000|90 days" "15552000|180 days"
 
-    [[ -z "${rotate_after_view}" ]] && pick_value "Rotation after viewing interval" rotate_after_view \
+    [[ -z "${rotate_after_view}" ]] && pick_value "Rotation after viewing interval" rotate_after_view "${3}" 86400 \
         "3600|1 hour" "10800|3 hours" "43200|12 hours" "86400|1 day" "259200|3 days" \
         "604800|7 days" "1|1 second"
+    echo
 }
 
 # --------------------------------------------------------------------------------
@@ -268,8 +284,9 @@ apply_uie() {
     crumb "Settings > Global > User-Initiated Enrollment > Computers"
 
     local enr
-    enr=$(jc pro enrollment-settings enrollment --output json 2>"${workdir}/uie-read.log")
-    if [[ -z "${enr}" ]]; then
+    enr=$(jc pro enrollment get --output json 2>"${workdir}/uie-read.log")
+    if [[ -z "${enr}" ]] || is_cli_error "${enr}"; then
+        [[ -n "${enr}" ]] && printf '%s\n' "${enr}" >> "${workdir}/uie-read.log"
         echo "  ERROR: Could not read enrollment settings."
         [[ -s "${workdir}/uie-read.log" ]] && /usr/bin/sed 's/^/    /' "${workdir}/uie-read.log"
         returncode=1
@@ -299,19 +316,6 @@ print("|".join([b(d.get("createManagementAccount")), (mu if isinstance(mu, str) 
     printf '  %-26s %s%s\n' "Hide managed admin"   "true"               "${was_hide}"
     echo
 
-    local new_enr
-    new_enr=$(printf '%s' "${enr}" | J_MU="${uie_username}" /usr/bin/python3 -c '
-import json, sys, os
-d = json.load(sys.stdin)
-if isinstance(d, dict) and isinstance(d.get("results"), dict):
-    d = d["results"]
-if isinstance(d, dict):
-    d["createManagementAccount"] = True
-    d["managementUsername"] = os.environ.get("J_MU", "lapsadmin")
-    d["hideManagementAccount"] = True
-print(json.dumps(d))
-' 2>/dev/null)
-
     if [[ $dry_run -eq 1 ]]; then
         echo "  (dry run) would set createManagementAccount=true, managementUsername=\"${uie_username}\", hideManagementAccount=true"
         echo
@@ -319,8 +323,10 @@ print(json.dumps(d))
     fi
     confirm "  Apply UIE change?" || { echo "  Skipped UIE change."; echo; return; }
 
-    if printf '%s' "${new_enr}" \
-        | jc pro enrollment-settings update-enrollment --output json \
+    if jc pro enrollment update --output json \
+          --set createManagementAccount=true \
+          --set "managementUsername=${uie_username}" \
+          --set hideManagementAccount=true \
           >"${workdir}/uie-write.log" 2>&1; then
         echo "  UIE managed admin set to \"${uie_username}\" (ticked + hidden)."
     else
@@ -339,8 +345,9 @@ apply_laps_rotation() {
     crumb "Settings > Computer Management > Security > LAPS"
 
     local cur
-    cur=$(jc pro local-admin-passwords settings --output json 2>"${workdir}/laps-read.log")
-    if [[ -z "${cur}" ]]; then
+    cur=$(jc pro local-admin-password settings get --output json 2>"${workdir}/laps-read.log")
+    if [[ -z "${cur}" ]] || is_cli_error "${cur}"; then
+        [[ -n "${cur}" ]] && printf '%s\n' "${cur}" >> "${workdir}/laps-read.log"
         echo "  ERROR: Could not read current LAPS settings."
         [[ -s "${workdir}/laps-read.log" ]] && /usr/bin/sed 's/^/    /' "${workdir}/laps-read.log"
         returncode=1
@@ -360,7 +367,7 @@ print("|".join([b(d.get("autoDeployEnabled")), b(d.get("autoRotateEnabled")),
 ' 2>/dev/null)
     IFS='|' read -r cur_deploy cur_rotate cur_expiry cur_rotview <<< "${tsv}"
 
-    choose_laps_settings
+    choose_laps_settings "${cur_rotate}" "${cur_expiry}" "${cur_rotview}"
 
     local final_deploy final_rotate final_expiry final_rotview
     final_deploy=true
@@ -407,7 +414,7 @@ print(json.dumps({
     confirm "  Apply LAPS settings?" || { echo "  Skipped LAPS settings."; echo; return; }
 
     if printf '%s' "${new_laps}" \
-        | jc pro local-admin-passwords update --output json \
+        | jc pro local-admin-password settings update --output json \
           >"${workdir}/laps-write.log" 2>&1; then
         echo "  LAPS settings applied."
     else
@@ -1139,17 +1146,22 @@ while [[ "$#" -gt 0 ]]; do
         -n|--dry-run)       dry_run=1 ;;
         -y|--yes)           assume_yes=1 ;;
         -v|--verbose)       verbose=1 ;;
+        -j|--jamf-cli)      shift; jamf_cli_path="$1" ;;
         -h|--help)          usage; exit 0 ;;
-        *) echo "Unknown option: $1"; usage; exit 1 ;;
+        *)
+            echo "ERROR: unknown option: $1 (see --help)"
+            exit 1
+            ;;
     esac
     shift
 done
 echo
 
-resolve_jamf_cli || exit 1
+ensure_dependencies jamf-cli || exit 1
 
 # temp working directory for per-instance API scratch files
-workdir=$(/usr/bin/mktemp -d /tmp/configure-macos-laps-XXXXXX)
+/bin/mkdir -p "${output_location}"
+workdir=$(/usr/bin/mktemp -d "${output_location}/configure-macos-laps.XXXXXX")
 trap 'remove_jamfcli_token; /bin/rm -rf "${workdir}"' EXIT
 
 # tenant mismatch check: --jss-url should target the same host as the chosen instance(s)
@@ -1174,7 +1186,7 @@ choose_destination_instances
 # loop through the chosen instances
 for instance in "${instance_choice_array[@]}"; do
     jss_instance="$instance"
-    section "Instance: ${jss_instance}"
+    section "${jss_instance}"
     if ! token_for_instance "$jss_instance"; then
         echo "  Could not obtain a token for ${jss_instance}. Skipping."
         returncode=1
