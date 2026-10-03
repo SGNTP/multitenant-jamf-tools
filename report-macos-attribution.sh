@@ -1,56 +1,40 @@
 #!/bin/bash
 
-# --------------------------------------------------------------------------------
-# Report macOS device attribution across one or more Jamf Pro instances.
+# Report the most likely owner of each target Mac, on one or more Jamf Pro
+# instances. Read-only.
 #
-# For each matched Mac, derives the most likely owner from signals already in the
-# Jamf Pro inventory record - MDM-capable accounts, FileVault-enabled accounts,
-# and the largest real home directory - and scores confidence High / Medium / Low
-# / None. Flags devices where the assigned user disagrees with what is actually
-# on the disk (Conflict = YES); those are the rows worth chasing first in a
+# Flow: instance(s) -> which Macs (default all) -> output folder ->
+#       per instance: inventory + user/location history -> score -> report.
+#
+# Interactively it asks only which Macs to cover; every signal and the
+# user/location history are always gathered. Filters (--model, --chip,
+# --enrolled-from/-to) and --requested-by are flag-only.
+#
+# For each Mac the owner is inferred from signals already in the inventory
+# record - MDM-capable accounts, FileVault-enabled accounts, the largest real
+# home directory and the last user seen by the Jamf binary - and scored
+# High / Medium / Low / None. Conflict = YES flags Macs whose assigned user
+# disagrees with what is on the disk: the rows to chase first in a
 # missing-hardware audit.
 #
-# Output per instance:
-#   /tmp/mjt/macOS-Attribution-<instance>-<YYYY-MM-DD-HHMM>.xlsx
-#   /tmp/mjt/macOS-Attribution-<instance>-<YYYY-MM-DD-HHMM>_devices.csv
+# Workbook sheets: Summary, Devices, Local Accounts, User History, Not
+# Obtainable (login history and IP history are not kept by Jamf Pro).
 #
-# What this tool explicitly does NOT produce (see the "Not Obtainable" sheet):
-#   - Login timestamps or login history  (Jamf Pro does not retain them)
-#   - IP address history                 (only the current IP is stored)
+# Contains personal data (usernames, names, email, IPs): handle per UK GDPR /
+# GDPR; the customer is data controller for customer tenants.
 #
-# PRIVILEGES: the Keychain account needs read on Computers (inventory + history).
-# GET requests only - nothing is written to any Jamf Pro instance.
-# --------------------------------------------------------------------------------
+# Privileges: Read on Computers and Computer Groups (inventory + history).
 #
-# CHANGE LOG
-# 1.0 - Initial release. Inventory pull via Jamf Pro API v1 computers-inventory
-#       (6 sections). Attribution scoring: MDM-capable (S2), FileVault (S3),
-#       largest home directory (S4), assigned user (S1). Classic API UserLocation
-#       history per matched device (--history). Excel + CSV output.
-# --------------------------------------------------------------------------------
+# Usage:
+#   ./report-macos-attribution.sh -i https://tenant.jamfcloud.com \
+#       --all-devices --model "MacBook Air" --enrolled-from 2025-04-01
 
-# set instance list type
+# computers live on macOS instances
 instance_list_type="mac"
 
-# defaults
-filter_model=""
-filter_chip=""
-enrolled_from=""
-enrolled_to=""
-date_basis="enrollment"    # enrollment | initial-entry
-do_history=1
-output_dir=""
-probe=0
-dry_run=0
-assume_yes=0
-no_interaction=0
-
-workdir=""
-returncode=0
-
-# --------------------------------------------------------------------------------
-# ENVIRONMENT CHECKS
-# --------------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+# ENVIRONMENT
+# -------------------------------------------------------------------------
 
 DIR=$(/usr/bin/dirname "$0")
 source "$DIR/_common-framework.sh"
@@ -60,316 +44,156 @@ if [[ ! -d "${this_script_dir}" ]]; then
     exit 1
 fi
 
-if ! /usr/bin/python3 --version &>/dev/null; then
-    echo "ERROR: python3 not found."
+# -------------------------------------------------------------------------
+# ARGS
+# -------------------------------------------------------------------------
+
+target_mode=""
+target_values=()
+group_name=""
+filter_model=""
+filter_chip=""
+enrolled_from=""
+enrolled_to=""
+date_basis=""
+do_history=""
+requested_by=""
+output_dir=""
+probe=0
+dry_run=0
+returncode=0
+device_platform="computer"
+
+while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+        -il|--instance-list)  shift; chosen_instance_list_file="$1" ;;
+        -i|--instance)        shift; chosen_instances+=("$1") ;;
+        -a|--all-instances|--all) all_instances=1 ;;
+        --id|--client-id|--user) shift; chosen_id="$1" ;;
+        -x|--nointeraction)   no_interaction=1 ;;
+        -v|--verbose)         verbose=1 ;;
+        -j|--jamf-cli)        shift; jamf_cli_path="$1" ;;
+        -o|--output-dir|--out) shift; output_dir="$1" ;;
+        -y|--yes)             assume_yes=1 ;;
+        -n|--dry-run)         dry_run=1 ;;
+        --model)              shift; filter_model="$1" ;;
+        --chip)               shift; filter_chip="$1" ;;
+        --enrolled-from)      shift; enrolled_from="$1" ;;
+        --enrolled-to)        shift; enrolled_to="$1" ;;
+        --date-basis)         shift; date_basis="$1" ;;
+        --history)            do_history=1 ;;
+        --no-history)         do_history=0 ;;
+        --requested-by)       shift; requested_by="$1" ;;
+        --probe)              probe=1 ;;
+        --serial|--name|--name-match|--group|--all-devices)
+            parse_target_arg "$@" || exit 1
+            shift "$target_args_used"
+            continue
+            ;;
+        -h|--help)
+            echo "Usage: $0 [MJT flags] [target flags] [filter flags] [--history|--no-history]"
+            echo ""
+            print_target_usage
+            echo "                           (default: every computer)"
+            echo ""
+            echo "Filters (all optional):"
+            echo "  --model STRING           Model contains STRING, e.g. \"MacBook Air\""
+            echo "  --chip STRING            Processor contains STRING, e.g. \"M3\" (\"Apple\" = any Apple silicon)"
+            echo "  --enrolled-from DATE     On or after YYYY-MM-DD"
+            echo "  --enrolled-to DATE       On or before YYYY-MM-DD"
+            echo "  --date-basis BASIS       enrollment (last enrolment, default) | initial-entry"
+            echo ""
+            echo "History (included by default; one API call per Mac):"
+            echo "  --no-history             Skip it (faster on large fleets; User History sheet left empty)"
+            echo ""
+            echo "Output:"
+            echo "  -o  | --output-dir DIR   Where to save the report (prompts /tmp or ~/Desktop if omitted)"
+            echo "  --requested-by NAME      Recorded on the Summary sheet's data-handling note"
+            echo "  -n  | --dry-run          Print the summary only; write no report"
+            echo "  --probe                  Print one raw inventory + history record, then exit"
+            echo ""
+            echo "MJT flags:"
+            echo "  -il | --instance-list FILENAME"
+            echo "  -i  | --instance URL     (repeatable)"
+            echo "  -a  | --all-instances"
+            echo "  --id | --client-id CLIENT_ID"
+            echo "  -x  | --nointeraction"
+            echo "  -v  | --verbose"
+            echo "  -j  | --jamf-cli PATH"
+            exit 0
+            ;;
+        *)
+            echo "ERROR: unknown option: $1 (see --help)"
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+for d in "$enrolled_from" "$enrolled_to"; do
+    if [[ -n "$d" && ! "$d" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        echo "ERROR: enrolment dates must be YYYY-MM-DD (got '$d')."
+        exit 1
+    fi
+done
+if [[ -n "$date_basis" && "$date_basis" != "enrollment" && "$date_basis" != "initial-entry" ]]; then
+    echo "ERROR: --date-basis must be enrollment or initial-entry."
     exit 1
 fi
 
-# --------------------------------------------------------------------------------
+interactive=1
+[[ "${no_interaction:-0}" -eq 1 || ! -t 0 ]] && interactive=0
+do_history="${do_history:-1}"
+[[ $interactive -eq 0 ]] && target_mode="${target_mode:-all}"
+
+# -------------------------------------------------------------------------
 # FUNCTIONS
-# --------------------------------------------------------------------------------
+# -------------------------------------------------------------------------
 
-usage() {
-    /bin/cat <<'USAGE'
-
-report-macos-attribution.sh - macOS device attribution report
-
-Fetches Jamf Pro inventory and scores each Mac with an inferred owner (High /
-Medium / Low / None confidence) based on MDM-capable accounts, FileVault users,
-and home directory size. Flags devices where the Jamf-assigned user disagrees
-with what is on the disk.
-
-Filters (prompt interactively when omitted):
-  --model STRING          Model substring to match, e.g. "MacBook Air"
-  --chip STRING           Processor substring, e.g. "Apple" or "M3"
-  --enrolled-from DATE    ISO date lower bound, e.g. 2025-04-01
-  --enrolled-to DATE      ISO date upper bound, e.g. 2025-04-30
-  --date-basis BASIS      enrollment (default) | initial-entry
-
-History:
-  --history               Fetch Classic API user-location history (default)
-  --no-history            Skip history (faster; User History sheet will be empty)
-
-Output:
-  -o | --output-dir DIR   Directory for output files (prompts /tmp or ~/Desktop
-                          if omitted; /tmp with -x). --out is an alias.
-
-Instances:
-  -il | --instance-list FILENAME
-  -i  | --instance JSS_URL
-  -a  | --all
-  --user | --client-id CLIENT_ID
-
-Probe / debug:
-  --probe                 Fetch one device with all sections and dump JSON; exit
-
-Other:
-  -n | --dry-run          Show what would run; write nothing
-  -v | --verbose          Verbose curl output
-  -h | --help             This help
-
-USAGE
-}
-
-# Interactive prompt with a default. $1=prompt $2=outvar $3=default
-ask() {
-    local prompt="$1" outvar="$2" default="$3" ans
-    [[ "$assume_yes" -eq 1 ]] && { printf -v "$outvar" '%s' "$default"; return; }
-    [[ ! -t 0 ]] && { printf -v "$outvar" '%s' "$default"; return; }
-    if [[ -n "$default" ]]; then
-        read -r -p "  ${prompt} [${default}]: " ans
-        printf -v "$outvar" '%s' "${ans:-$default}"
-    else
-        read -r -p "  ${prompt}: " ans
-        printf -v "$outvar" '%s' "${ans}"
-    fi
-}
-
-# Probe: fetch one device record with all sections and dump JSON, then exit.
-run_probe() {
-    section "Probe - raw inventory record (1 device)"
-    jss_url="$jss_instance"
-    if [[ "$chosen_id" ]]; then
-        set_credentials "$jss_instance" "$chosen_id"
-    else
-        set_credentials "$jss_instance"
-    fi
-    check_token
-
-    local sections="section=GENERAL&section=HARDWARE&section=USER_AND_LOCATION"
-    sections="${sections}&section=LOCAL_USER_ACCOUNTS&section=DISK_ENCRYPTION"
-    sections="${sections}&section=OPERATING_SYSTEM"
-    curl_url="${jss_url}/api/v1/computers-inventory?${sections}&page=0&page-size=1&sort=id:asc"
-    curl_args=("--request" "GET" "--header" "Accept: application/json")
-    send_curl_request
-
-    echo
-    echo "  Raw response (one device, all sections):"
-    echo
-    /usr/bin/python3 -c "
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-    results = d.get('results', d) if isinstance(d, dict) else d
-    sample = results[0] if isinstance(results, list) and results else d
-    print(json.dumps(sample, indent=2))
-except Exception as e:
-    print('Could not parse:', e)
-    import pathlib
-    print(pathlib.Path(sys.argv[1]).read_text()[:2000])
-" "$curl_output_file"
-
-    echo
-    echo "  Classic API UserLocation for device id above:"
-    local dev_id
-    dev_id=$(/usr/bin/python3 -c "
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-    results = d.get('results', []) if isinstance(d, dict) else []
-    print(results[0].get('id','') if results else '')
-except: print('')
-" "$curl_output_file" 2>/dev/null)
-
-    if [[ -n "$dev_id" ]]; then
-        curl_url="${jss_url}/JSSResource/computerhistory/id/${dev_id}/subset/UserLocation"
-        curl_args=("--request" "GET" "--header" "Accept: application/json")
-        send_curl_request
-        /usr/bin/python3 -c "
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-    print(json.dumps(d, indent=2))
-except Exception as e:
-    import pathlib
-    print(pathlib.Path(sys.argv[1]).read_text()[:2000])
-" "$curl_output_file"
-    fi
-    echo
-}
-
-# Fetch all inventory pages for the current $jss_instance.
-# Writes results as a JSON array to $workdir/inventory.json.
-fetch_inventory() {
-    local inst_slug="$1"
-    local sections="section=GENERAL&section=HARDWARE&section=USER_AND_LOCATION"
-    sections="${sections}&section=LOCAL_USER_ACCOUNTS&section=DISK_ENCRYPTION"
-    sections="${sections}&section=OPERATING_SYSTEM"
-    local inv_file="$workdir/inventory.json"
-    local jsonl_file="$workdir/inventory.jsonl"
-    : > "$jsonl_file"
-
-    jss_url="$jss_instance"
-    if [[ "$chosen_id" ]]; then
-        set_credentials "$jss_instance" "$chosen_id"
-    else
-        set_credentials "$jss_instance"
-    fi
-    check_token
-
-    # First page - also gets totalCount
-    curl_url="${jss_url}/api/v1/computers-inventory?${sections}&page=0&page-size=200&sort=id:asc"
-    curl_args=("--request" "GET" "--header" "Accept: application/json")
-    send_curl_request
-
-    local total_count
-    total_count=$(/usr/bin/python3 -c "
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-    results = d.get('results', [])
-    for r in results:
-        print(__import__('json').dumps(r))
-    print(d.get('totalCount', len(results)), file=__import__('sys').stderr)
-except Exception as e:
-    print(0, file=__import__('sys').stderr)
-" "$curl_output_file" >> "$jsonl_file" 2>"$workdir/tc.txt")
-    total_count=$(/bin/cat "$workdir/tc.txt" 2>/dev/null || echo 0)
-    echo "  Total devices in instance: ${total_count}"
-
-    local fetched=200
-    local page=1
-    while [[ $fetched -lt $total_count ]]; do
-        curl_url="${jss_url}/api/v1/computers-inventory?${sections}&page=${page}&page-size=200&sort=id:asc"
-        curl_args=("--request" "GET" "--header" "Accept: application/json")
-        send_curl_request
-
-        local count_this
-        count_this=$(/usr/bin/python3 -c "
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-    results = d.get('results', [])
-    for r in results:
-        print(__import__('json').dumps(r))
-    print(len(results), file=__import__('sys').stderr)
-except: print(0, file=__import__('sys').stderr)
-" "$curl_output_file" >> "$jsonl_file" 2>"$workdir/ct.txt")
-        count_this=$(/bin/cat "$workdir/ct.txt" 2>/dev/null || echo 0)
-        fetched=$(( fetched + count_this ))
-        page=$(( page + 1 ))
-        printf '\r  Fetched %d / %d...' "$fetched" "$total_count"
-    done
-    printf '\r  Fetched %d devices.          \n' "$total_count"
-
-    # Consolidate JSONL -> JSON array
-    /usr/bin/python3 -c "
-import sys, json
-records = []
-with open(sys.argv[1]) as f:
-    for line in f:
-        line = line.strip()
-        if line:
-            try: records.append(json.loads(line))
-            except: pass
-with open(sys.argv[2], 'w') as out:
-    json.dump({'results': records}, out)
-" "$jsonl_file" "$inv_file"
-    echo "  Inventory written to: ${inv_file}"
-}
-
-# Fetch Classic API UserLocation history for each device in matched_ids.
-# Writes a JSON object {device_id: [entries,...]} to $workdir/history.json.
-fetch_history() {
-    local hist_file="$workdir/history.json"
-    local matched_ids_file="$1"
-    local total
-    total=$(/usr/bin/wc -l < "$matched_ids_file" | /usr/bin/tr -d ' ')
-
-    echo "  Fetching user-location history for ${total} matched device(s)..."
-
-    local hist_tmp="$workdir/hist_tmp.txt"
-    echo "{" > "$hist_tmp"
-    local first=1
-    local n=0
-    while IFS= read -r dev_id; do
-        [[ -z "$dev_id" ]] && continue
-        n=$(( n + 1 ))
-        curl_url="${jss_url}/JSSResource/computerhistory/id/${dev_id}/subset/UserLocation"
-        curl_args=("--request" "GET" "--header" "Accept: application/json")
-        send_curl_request
-
-        local entries
-        entries=$(/usr/bin/python3 -c "
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-    # Classic API: computer_history.user_location[]
-    ch = d.get('computer_history', d) if isinstance(d, dict) else {}
-    ul = ch.get('user_location', []) if isinstance(ch, dict) else []
-    if not isinstance(ul, list): ul = []
-    print(json.dumps(ul))
-except Exception as e:
-    print('[]')
-" "$curl_output_file" 2>/dev/null)
-
-        if [[ $first -eq 1 ]]; then
-            printf '"%s": %s' "$dev_id" "${entries:-[]}" >> "$hist_tmp"
-            first=0
-        else
-            printf ', "%s": %s' "$dev_id" "${entries:-[]}" >> "$hist_tmp"
-        fi
-        printf '\r  History: %d / %d...' "$n" "$total"
-        # gentle rate limit
-        [[ $(( n % 10 )) -eq 0 ]] && /bin/sleep 0.2
-    done < "$matched_ids_file"
-    echo "}" >> "$hist_tmp"
-    mv "$hist_tmp" "$hist_file"
-    printf '\r  History fetched (%d devices).       \n' "$n"
-}
-
-# Write the Python scorer/reporter script to $workdir/score.py
 write_scorer() {
-    /bin/cat > "$workdir/score.py" << 'PYEOF'
+    /bin/cat > "${workdir}/score.py" << 'PYEOF'
 """
-macOS Attribution Report scorer and Excel/CSV writer.
+Filter, score and write the attribution report for one instance.
 
-argv[1] = inventory JSON file   {"results": [...]}
-argv[2] = history JSON file     {device_id_str: [user_location_entries]}  (or {})
-argv[3] = output XLSX path
-argv[4] = output CSV path
-argv[5] = filter/run-info JSON  {model_filter, chip_filter, enrolled_from,
-                                  enrolled_to, date_basis, instance, operator,
-                                  run_ts, requested_by}
+argv[1] = inventory JSON (array, or {"results": [...]})
+argv[2] = group member computer IDs file (one per line; used for target mode "group")
+argv[3] = history dir (<computerId>.json from classic-computer-history, UserLocation)
+argv[4] = mode: "ids" (print matched computer IDs) | "report"
+argv[5] = output path without extension ("" = summary only)
+Filters and run details come from J_* environment variables.
 """
 import sys, os, json, csv, re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from collections import Counter
 
-inv_file, hist_file, xlsx_path, csv_path, run_info_json = sys.argv[1:6]
+inv_file, members_file, hist_dir, mode, out_base = sys.argv[1:6]
+env = os.environ.get
 
-try:
-    inventory_raw = json.load(open(inv_file))
-except Exception as e:
-    sys.exit(f"ERROR reading inventory: {e}")
-
+inventory_raw = json.load(open(inv_file))
 records = inventory_raw.get("results", []) if isinstance(inventory_raw, dict) else inventory_raw
+records = [r for r in records if isinstance(r, dict)]
+members = {l.strip() for l in open(members_file) if l.strip()} if members_file else set()
 
-try:
-    history_map = json.load(open(hist_file))
-except Exception:
-    history_map = {}
+target_mode = env("J_MODE", "all")
+target_values = [v.strip().lower() for v in env("J_VALUES", "").split("\n") if v.strip()]
+model_f = env("J_MODEL", "").lower()
+chip_f = env("J_CHIP", "").lower()
+enr_from = env("J_FROM", "")
+enr_to = env("J_TO", "")
+basis = env("J_BASIS", "") or "enrollment"
+instance = env("J_INSTANCE", "")
 
-try:
-    run_info = json.loads(run_info_json)
-except Exception:
-    run_info = {}
-
-# ── exclusion list ────────────────────────────────────────────────────────────
 EXCLUDED = {
     "root", "daemon", "nobody", "admin", "administrator", "localadmin",
     "jamfadmin", "jamfmanage", "macadmin", "itadmin", "test", "guest",
     "lapsadmin", "_mbsetupuser",
 }
 HOME_FLOOR_MB = 1000
+APPLE_SILICON_KEYWORDS = {"apple", "silicon", "m1", "m2", "m3", "m4", "m5"}
 
 
 def is_system(username, uid=None):
-    if not username:
-        return True
-    if username.startswith("_"):
-        return True
-    if username.lower() in EXCLUDED:
+    if not username or username.startswith("_") or username.lower() in EXCLUDED:
         return True
     if uid is not None:
         try:
@@ -380,157 +204,137 @@ def is_system(username, uid=None):
     return False
 
 
-# ── date helpers ─────────────────────────────────────────────────────────────
 def parse_iso(s):
     if not s:
         return None
     try:
-        s2 = re.sub(r"\.\d+", "", str(s)).replace("Z", "+00:00")
-        return datetime.fromisoformat(s2)
+        dt = datetime.fromisoformat(re.sub(r"\.\d+", "", str(s)).replace("Z", "+00:00"))
     except Exception:
         return None
-
-
-def tz(dt):
-    if dt and dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def in_range(dt, lo_str, hi_str):
-    if dt is None:
+    if not (lo_str or hi_str):
         return True
-    dt = tz(dt)
-    if lo_str:
-        lo = tz(parse_iso(lo_str))
-        if lo and dt < lo:
-            return False
-    if hi_str:
-        hi = tz(parse_iso(hi_str))
-        if hi and dt > hi:
-            return False
+    if dt is None:
+        return False
+    lo = parse_iso(lo_str)
+    hi = parse_iso(hi_str)
+    if lo and dt < lo:
+        return False
+    # a date-only upper bound includes that whole day
+    if hi and dt >= hi + timedelta(days=1):
+        return False
     return True
 
 
 def fmt_date(s):
     if not s:
         return ""
-    s = str(s).strip().replace("T", " ")
-    s = re.sub(r"\.\d+", "", s)
-    s = re.sub(r"Z$", "", s)
-    s = re.sub(r"[+-]\d{2}:?\d{2}$", "", s)
-    return s[:16].strip() if len(s) >= 16 else s.strip()
+    s = re.sub(r"\.\d+", "", str(s).strip().replace("T", " "))
+    s = re.sub(r"(Z|[+-]\d{2}:?\d{2})$", "", s)
+    return s[:16].strip()
 
 
-# ── filter ───────────────────────────────────────────────────────────────────
-model_f  = (run_info.get("model_filter") or "").lower()
-chip_f   = (run_info.get("chip_filter") or "").lower()
-enr_from = run_info.get("enrolled_from") or ""
-enr_to   = run_info.get("enrolled_to") or ""
-basis    = run_info.get("date_basis") or "enrollment"
+def g(rec, section, key):
+    return (rec.get(section) or {}).get(key)
 
-APPLE_SILICON_KEYWORDS = {"apple", "silicon", "m1", "m2", "m3", "m4", "m5"}
+
+def computer_id(rec):
+    return str(rec.get("id") or g(rec, "general", "id") or "")
+
+
+def enrol_date(rec):
+    if basis == "initial-entry":
+        return g(rec, "general", "initialEntryDate")
+    return g(rec, "general", "lastEnrolledDate") or g(rec, "general", "enrollmentDate")
 
 
 def passes(rec):
-    hw = rec.get("hardware") or {}
-    g  = rec.get("general") or {}
-    if model_f:
-        m = (hw.get("model") or hw.get("modelIdentifier") or "").lower()
-        if model_f not in m:
-            return False
-    if chip_f:
-        proc = (hw.get("processorType") or "").lower()
-        if chip_f not in proc:
-            if chip_f in APPLE_SILICON_KEYWORDS:
-                if not hw.get("appleSilicon", False):
-                    return False
-            else:
-                return False
-    raw_date = (g.get("enrollmentDate") or g.get("initialEntryDate") or "") \
-               if basis == "enrollment" \
-               else (g.get("initialEntryDate") or g.get("enrollmentDate") or "")
-    if not in_range(parse_iso(raw_date), enr_from, enr_to):
+    name = (g(rec, "general", "name") or "").lower()
+    serial = (g(rec, "hardware", "serialNumber") or "").lower()
+    if target_mode == "group" and computer_id(rec) not in members:
         return False
-    return True
+    if target_mode == "serial" and serial not in target_values:
+        return False
+    if target_mode == "name" and name not in target_values:
+        return False
+    if target_mode == "name-match" and (not target_values or target_values[0] not in name):
+        return False
+    if model_f and model_f not in (g(rec, "hardware", "model") or g(rec, "hardware", "modelIdentifier") or "").lower():
+        return False
+    if chip_f and chip_f not in (g(rec, "hardware", "processorType") or "").lower():
+        if not (chip_f in APPLE_SILICON_KEYWORDS and g(rec, "hardware", "appleSilicon")):
+            return False
+    return in_range(parse_iso(enrol_date(rec)), enr_from, enr_to)
 
 
-# ── scorer ───────────────────────────────────────────────────────────────────
+matched_recs = [r for r in records if passes(r)]
+
+if mode == "ids":
+    for r in matched_recs:
+        print(computer_id(r))
+    sys.exit(0)
+
+
 def score(rec):
-    g  = rec.get("general") or {}
-    ul = rec.get("userAndLocation") or {}
+    gen = rec.get("general") or {}
     la = rec.get("localUserAccounts") or []
-    de = rec.get("diskEncryption") or {}
 
-    s1 = (ul.get("username") or "").strip().lower()
+    s1 = (g(rec, "userAndLocation", "username") or "").strip().lower()
 
     # S2 - MDM-capable accounts (secure token holders)
-    s2 = []
-    for u in ((g.get("mdmCapable") or {}).get("capableUsers") or []):
-        u = (u or "").strip().lower()
-        if u and not is_system(u):
-            s2.append(u)
+    s2 = [u.strip().lower() for u in ((gen.get("mdmCapable") or {}).get("capableUsers") or [])
+          if u and not is_system(u.strip().lower())]
 
     # S3 - FileVault-enabled accounts
-    s3 = []
-    for u in (de.get("fileVault2EnabledUserNames") or []):
-        u = (u or "").strip().lower()
-        if u and not is_system(u):
-            s3.append(u)
+    s3 = [u.strip().lower() for u in (g(rec, "diskEncryption", "fileVault2EnabledUserNames") or [])
+          if u and not is_system(u.strip().lower())]
 
     # S4 - largest real home directory
     s4_candidates = []
     for acct in la:
         uname = (acct.get("username") or "").strip().lower()
-        uid   = acct.get("uid")
-        home  = acct.get("homeDirectorySizeMb") or 0
-        if is_system(uname, uid):
+        if is_system(uname, acct.get("uid")):
             continue
         try:
-            home = float(home)
+            home = float(acct.get("homeDirectorySizeMb") or 0)
         except (TypeError, ValueError):
             home = 0
-        if home < HOME_FLOOR_MB:
-            continue
-        s4_candidates.append((uname, home))
+        if home >= HOME_FLOOR_MB:
+            s4_candidates.append((uname, home))
     s4_candidates.sort(key=lambda x: x[1], reverse=True)
     s4 = s4_candidates[0][0] if s4_candidates else None
 
     # S5 - last logged-in user recorded by the Jamf binary at recon time
-    s5_raw = (g.get("lastLoggedInUsernameBinary") or "").strip().lower()
-    s5_ts  = fmt_date(g.get("lastLoggedInUsernameBinaryTimestamp") or "")
+    s5_raw = (gen.get("lastLoggedInUsernameBinary") or "").strip().lower()
+    s5_ts = fmt_date(gen.get("lastLoggedInUsernameBinaryTimestamp") or "")
     s5 = s5_raw if (s5_raw and not is_system(s5_raw)) else None
 
-    # votes
     votes = Counter()
-    for u in s2: votes[u] += 1
-    for u in s3: votes[u] += 1
-    if s4: votes[s4] += 1
-    if s5: votes[s5] += 1
+    for u in s2:
+        votes[u] += 1
+    for u in s3:
+        votes[u] += 1
+    if s4:
+        votes[s4] += 1
+    if s5:
+        votes[s5] += 1
 
     inferred = None
     if votes:
         top_n = max(votes.values())
-        top   = [u for u, c in votes.items() if c == top_n]
-        if len(top) == 1:
-            inferred = top[0]
-        elif s2:
-            inferred = s2[0]
-        else:
-            inferred = top[0]
+        top = [u for u, c in votes.items() if c == top_n]
+        inferred = top[0] if len(top) == 1 else (s2[0] if s2 else top[0])
 
-    # confidence
     if inferred:
-        agree_count = sum(1 for u in [
-            s2[0] if s2 else None,
-            s3[0] if s3 else None,
-            s4,
-            s5,
-        ] if u == inferred)
+        agree_count = sum(1 for u in [s2[0] if s2 else None, s3[0] if s3 else None, s4, s5]
+                          if u == inferred)
         s1_ok = (not s1) or (s1 == inferred)
         if agree_count >= 2 and s1_ok:
             conf = "High"
-        elif agree_count >= 2 and not s1_ok:
+        elif agree_count >= 2:
             conf = "Medium"
         elif s4 == inferred and not s2 and not s3 and not s5 and s4_candidates:
             conf = "Medium"
@@ -538,8 +342,6 @@ def score(rec):
             conf = "Low"
     else:
         conf = "None"
-
-    conflict = bool(s1 and inferred and s1 != inferred)
 
     signals = []
     if s1: signals.append("S1(assigned)")
@@ -551,554 +353,480 @@ def score(rec):
     return {
         "inferred": inferred or "",
         "confidence": conf,
-        "conflict": conflict,
+        "conflict": bool(s1 and inferred and s1 != inferred),
         "evidence": ", ".join(signals),
         "s1": s1,
-        "s2_str": ", ".join(s2),
-        "s3_str": ", ".join(s3),
-        "s4": s4 or "",
         "s5": s5 or "",
         "s5_ts": s5_ts,
-        "local_accounts": la,
     }
 
 
-# ── build matched list ────────────────────────────────────────────────────────
-matched = []
-for rec in records:
-    if not passes(rec):
-        continue
-    g  = rec.get("general") or {}
-    dev_id = str(g.get("id") or rec.get("id") or "")
-    hist = history_map.get(dev_id, [])
-    matched.append((rec, score(rec), hist))
+def history_for(cid):
+    path = os.path.join(hist_dir, f"{cid}.json")
+    if not cid or not os.path.exists(path):
+        return []
+    try:
+        d = json.load(open(path))
+    except (OSError, ValueError):
+        return []
+    node = d.get("computer_history", d) if isinstance(d, dict) else {}
+    ul = node.get("user_location") if isinstance(node, dict) else None
+    if isinstance(ul, dict):
+        ul = ul.get("location")
+    if isinstance(ul, dict):
+        ul = [ul]
+    # skip entries with nothing but a timestamp
+    keys = ("username", "full_name", "email_address", "department", "building", "position")
+    return [e for e in (ul or []) if isinstance(e, dict) and any(e.get(k) for k in keys)]
 
-conf_dist     = Counter(s["confidence"] for _, s, _ in matched)
+
+matched = [(r, score(r), history_for(computer_id(r))) for r in matched_recs]
+conf_dist = Counter(s["confidence"] for _, s, _ in matched)
 conflict_count = sum(1 for _, s, _ in matched if s["conflict"])
-
-run_info["device_count"] = len(matched)
-
-# ── CSV ───────────────────────────────────────────────────────────────────────
-CSV_COLS = [
-    "id", "name", "serial", "model", "processor", "os_version",
-    "enrolled_date", "initial_entry_date", "last_contact", "last_ip",
-    "device_record_user", "last_logged_in_user", "last_logged_in_timestamp",
-    "attributed_user", "confidence", "conflict", "evidence",
-]
-
-with open(csv_path, "w", newline="", encoding="utf-8") as f:
-    w = csv.writer(f)
-    w.writerow(CSV_COLS)
-    for rec, s, _ in matched:
-        g  = rec.get("general") or {}
-        hw = rec.get("hardware") or {}
-        os_= rec.get("operatingSystem") or {}
-        w.writerow([
-            str(g.get("id") or rec.get("id") or ""),
-            g.get("name") or "",
-            hw.get("serialNumber") or "",
-            hw.get("model") or "",
-            hw.get("processorType") or "",
-            os_.get("version") or "",
-            fmt_date(g.get("enrollmentDate") or g.get("initialEntryDate") or ""),
-            fmt_date(g.get("initialEntryDate") or ""),
-            fmt_date(g.get("lastContactTime") or ""),
-            g.get("lastReportedIp") or g.get("lastIpAddress") or "",
-            s["s1"], s["s5"], s["s5_ts"],
-            s["inferred"], s["confidence"],
-            "YES" if s["conflict"] else "",
-            s["evidence"],
-        ])
-
-print(f"  CSV: {csv_path}")
-
-# ── Excel ─────────────────────────────────────────────────────────────────────
-try:
-    import openpyxl
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    from openpyxl.utils import get_column_letter
-except ImportError:
-    print("  XLSX skipped (openpyxl not installed). CSV written.")
-    print(f"  Matched: {len(matched)}  Conflicts: {conflict_count}")
-    sys.exit(0)
-
-BLUE   = "1E88E5"; WHITE = "FFFFFF"; GREY = "F5F5F5"
-YELLOW = "FFF9C4"; RED   = "FFEBEE"; PINK = "FCE4EC"
-DARK_BLUE = "1565C0"
+history_rows = sum(len(h) for _, _, h in matched)
 
 
-def fill(c):
-    return PatternFill("solid", fgColor=c)
-
-
-def font(bold=False, colour="000000", size=10):
-    return Font(bold=bold, color=colour, size=size, name="Arial")
-
-
-def thin(c="D0D0D0"):
-    return Side(style="thin", color=c)
-
-
-def border(c="D0D0D0"):
-    s = thin(c)
-    return Border(left=s, right=s, top=s, bottom=s)
-
-
-def hdr_row(ws, cols, row=1):
-    for ci, label in enumerate(cols, 1):
-        cell = ws.cell(row=row, column=ci, value=label)
-        cell.font = font(bold=True, colour=WHITE)
-        cell.fill = fill(BLUE)
-        cell.border = border(DARK_BLUE)
-        cell.alignment = Alignment(wrap_text=True, vertical="center")
-    ws.row_dimensions[row].height = 28
-
-
-def autofit(ws, mn=8, mx=50):
-    for col in ws.columns:
-        w = max((len(str(c.value or "")) for c in col), default=mn)
-        ws.column_dimensions[get_column_letter(col[0].column)].width = min(max(w + 2, mn), mx)
-
-
-wb = openpyxl.Workbook()
-
-# ── Summary ──────────────────────────────────────────────────────────────────
-ws = wb.active
-ws.title = "Summary"
-ws.column_dimensions["A"].width = 38
-ws.column_dimensions["B"].width = 55
-
-
-def srow(ws, label, value, r):
-    ws.cell(row=r, column=1, value=label).font = font(bold=True)
-    ws.cell(row=r, column=2, value=str(value) if value is not None else "")
-    ws.row_dimensions[r].height = 18
-
-
-r = 1
-for col in (1, 2):
-    ws.cell(row=r, column=col).fill = fill(BLUE)
-ws.cell(row=r, column=1, value="macOS Attribution Report").font = font(bold=True, colour=WHITE, size=14)
-ws.row_dimensions[r].height = 28
-r += 1
-
-srow(ws, "Instance", run_info.get("instance", ""), r); r += 1
-srow(ws, "Run timestamp", run_info.get("run_ts", ""), r); r += 1
-srow(ws, "Operator", run_info.get("operator", ""), r); r += 1
-srow(ws, "Model filter", run_info.get("model_filter", "(none)"), r); r += 1
-srow(ws, "Chip filter", run_info.get("chip_filter", "(none)"), r); r += 1
-srow(ws, "Date basis", run_info.get("date_basis", "enrollment"), r); r += 1
-srow(ws, "Enrolled from", run_info.get("enrolled_from", "(none)"), r); r += 1
-srow(ws, "Enrolled to", run_info.get("enrolled_to", "(none)"), r); r += 1
-srow(ws, "Devices matched", run_info.get("device_count", 0), r); r += 1
-r += 1
-srow(ws, "High confidence", conf_dist.get("High", 0), r); r += 1
-srow(ws, "Medium confidence", conf_dist.get("Medium", 0), r); r += 1
-srow(ws, "Low confidence", conf_dist.get("Low", 0), r); r += 1
-srow(ws, "No attributable signal", conf_dist.get("None", 0), r); r += 1
-srow(ws, "Conflicts (assigned user vs disk)", conflict_count, r); r += 1
-r += 1
-
-# data handling banner
-for col in (1, 2):
-    ws.cell(row=r, column=col).fill = fill(PINK)
-ws.cell(row=r, column=1, value="DATA HANDLING").font = font(bold=True, size=11)
-ws.cell(row=r, column=2, value="Personal data - handle per UK GDPR / GDPR").font = font(size=11)
-ws.row_dimensions[r].height = 22; r += 1
-srow(ws, "Contains", "Usernames, real names, email, department, IP addresses", r); r += 1
-srow(ws, "Requested by", run_info.get("requested_by", ""), r); r += 1
-srow(ws, "Advice", "If this is a customer tenant, the customer is data controller. "
-     "Ensure a documented lawful basis exists before sharing.", r); r += 1
-
-# ── Devices ──────────────────────────────────────────────────────────────────
-ws2 = wb.create_sheet("Devices")
-DEV_COLS = [
-    "ID", "Name", "Serial", "Model", "Processor",
-    "OS Version", "Enrolled", "Initial Entry",
-    "Last Contact", "Last Reported IP",
-    "Device Record User", "Last Logged-in User", "Last Login Timestamp",
-    "Attributed User", "Confidence", "Conflict", "Evidence",
-]
-hdr_row(ws2, DEV_COLS)
-CONF_FILL = {"High": WHITE, "Medium": YELLOW, "Low": YELLOW, "None": RED}
-
-for ri, (rec, s, _) in enumerate(matched, 2):
-    g  = rec.get("general") or {}
-    hw = rec.get("hardware") or {}
-    os_= rec.get("operatingSystem") or {}
-    row_fill = RED if s["conflict"] else CONF_FILL.get(s["confidence"], WHITE)
-    vals = [
-        str(g.get("id") or rec.get("id") or ""),
-        g.get("name") or "",
-        hw.get("serialNumber") or "",
-        hw.get("model") or "",
-        hw.get("processorType") or "",
-        os_.get("version") or "",
-        fmt_date(g.get("enrollmentDate") or g.get("initialEntryDate") or ""),
-        fmt_date(g.get("initialEntryDate") or ""),
-        fmt_date(g.get("lastContactTime") or ""),
-        g.get("lastReportedIp") or g.get("lastIpAddress") or "",
+def device_row(rec, s):
+    cid = computer_id(rec)
+    return [
+        cid,
+        g(rec, "general", "name") or "",
+        g(rec, "hardware", "serialNumber") or "",
+        g(rec, "hardware", "model") or "",
+        g(rec, "hardware", "processorType") or "",
+        g(rec, "operatingSystem", "version") or "",
+        fmt_date(g(rec, "general", "lastEnrolledDate") or g(rec, "general", "enrollmentDate")),
+        fmt_date(g(rec, "general", "initialEntryDate")),
+        fmt_date(g(rec, "general", "lastContactTime")),
+        fmt_date(g(rec, "general", "reportDate")),
+        g(rec, "general", "lastReportedIpV4") or g(rec, "general", "lastReportedIp") or "",
+        g(rec, "general", "lastIpAddress") or "",
         s["s1"], s["s5"], s["s5_ts"],
         s["inferred"], s["confidence"],
         "YES" if s["conflict"] else "",
         s["evidence"],
+        f"{instance.rstrip('/')}/computers.html?id={cid}&o=r" if cid else "",
     ]
-    for ci, v in enumerate(vals, 1):
-        cell = ws2.cell(row=ri, column=ci, value=v)
-        cell.fill = fill(row_fill)
-        cell.border = border()
-        cell.alignment = Alignment(vertical="center")
-autofit(ws2)
-ws2.freeze_panes = "A2"
 
-# ── Local Accounts ────────────────────────────────────────────────────────────
-ws3 = wb.create_sheet("Local Accounts")
-ACCT_COLS = [
-    "Device ID", "Device Name", "Serial",
-    "Username", "Full Name", "Admin", "Type",
-    "Home Dir (MB)", "FileVault Enabled", "Azure AD ID",
+
+DEV_COLS = [
+    "ID", "Name", "Serial", "Model", "Processor", "macOS Version",
+    "Last Enrolled", "Initial Entry", "Last Contact", "Last Inventory",
+    "Last Reported IP", "Public IP",
+    "Device Record User", "Last Logged-in User", "Last Login Timestamp",
+    "Attributed User", "Confidence", "Conflict", "Evidence", "URL",
 ]
-hdr_row(ws3, ACCT_COLS)
-ar = 2
-for rec, s, _ in matched:
-    g  = rec.get("general") or {}
-    hw = rec.get("hardware") or {}
-    dev_id   = str(g.get("id") or rec.get("id") or "")
-    dev_name = g.get("name") or ""
-    serial   = hw.get("serialNumber") or ""
-    for acct in (rec.get("localUserAccounts") or []):
-        vals = [
-            dev_id, dev_name, serial,
-            acct.get("username") or "",
-            acct.get("fullName") or "",
-            "Yes" if acct.get("admin") else "No",
-            acct.get("userAccountType") or "",
-            acct.get("homeDirectorySizeMb") or "",
-            "Yes" if acct.get("fileVault2Enabled") else "No",
-            acct.get("azureActiveDirectoryId") or "",
+
+written = ""
+if out_base:
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        openpyxl = None
+
+    if openpyxl is None:
+        written = out_base + ".csv"
+        with open(written, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(DEV_COLS)
+            for rec, s, _ in matched:
+                w.writerow(device_row(rec, s))
+    else:
+        BLUE = "1E88E5"; WHITE = "FFFFFF"; YELLOW = "FFF9C4"; RED = "FFEBEE"
+        PINK = "FCE4EC"; DARK_BLUE = "1565C0"
+
+        def fill(c):
+            return PatternFill("solid", fgColor=c)
+
+        def font(bold=False, colour="000000", size=10, underline=None):
+            return Font(bold=bold, color=colour, size=size, name="Arial", underline=underline)
+
+        def border(c="D0D0D0"):
+            s = Side(style="thin", color=c)
+            return Border(left=s, right=s, top=s, bottom=s)
+
+        def hdr_row(ws, cols):
+            for ci, label in enumerate(cols, 1):
+                cell = ws.cell(row=1, column=ci, value=label)
+                cell.font = font(bold=True, colour=WHITE)
+                cell.fill = fill(BLUE)
+                cell.border = border(DARK_BLUE)
+                cell.alignment = Alignment(wrap_text=True, vertical="center")
+            ws.row_dimensions[1].height = 28
+            ws.freeze_panes = "A2"
+
+        def autofit(ws, mn=8, mx=50):
+            for col in ws.columns:
+                w = max((len(str(c.value or "")) for c in col), default=mn)
+                ws.column_dimensions[get_column_letter(col[0].column)].width = min(max(w + 2, mn), mx)
+
+        def table(ws, cols, rows, row_fill=None):
+            hdr_row(ws, cols)
+            for ri, vals in enumerate(rows, 2):
+                for ci, v in enumerate(vals, 1):
+                    cell = ws.cell(row=ri, column=ci, value=v)
+                    cell.border = border()
+                    cell.alignment = Alignment(vertical="center")
+                    if row_fill:
+                        cell.fill = fill(row_fill[ri - 2])
+            autofit(ws)
+
+        wb = openpyxl.Workbook()
+
+        # Summary
+        ws = wb.active
+        ws.title = "Summary"
+        ws.column_dimensions["A"].width = 38
+        ws.column_dimensions["B"].width = 60
+        r = 1
+
+        def srow(label, value):
+            global r
+            ws.cell(row=r, column=1, value=label).font = font(bold=True)
+            ws.cell(row=r, column=2, value="" if value is None else str(value))
+            r += 1
+
+        for col in (1, 2):
+            ws.cell(row=r, column=col).fill = fill(BLUE)
+        ws.cell(row=r, column=1, value="macOS Attribution Report").font = font(bold=True, colour=WHITE, size=14)
+        ws.row_dimensions[r].height = 28
+        r += 1
+        srow("Instance", instance)
+        srow("Run timestamp", env("J_RUN_TS", ""))
+        srow("Operator", env("J_OPERATOR", ""))
+        srow("Targets", env("J_TARGET_DESC", ""))
+        srow("Model filter", model_f or "(none)")
+        srow("Chip filter", chip_f or "(none)")
+        srow("Date basis", "initial entry" if basis == "initial-entry" else "last enrolment")
+        srow("Enrolled from", enr_from or "(none)")
+        srow("Enrolled to", enr_to or "(none)")
+        srow("Devices matched", len(matched))
+        r += 1
+        srow("High confidence", conf_dist.get("High", 0))
+        srow("Medium confidence", conf_dist.get("Medium", 0))
+        srow("Low confidence", conf_dist.get("Low", 0))
+        srow("No attributable signal", conf_dist.get("None", 0))
+        srow("Conflicts (assigned user vs disk)", conflict_count)
+        r += 1
+        for col in (1, 2):
+            ws.cell(row=r, column=col).fill = fill(PINK)
+        ws.cell(row=r, column=1, value="DATA HANDLING").font = font(bold=True, size=11)
+        ws.cell(row=r, column=2, value="Personal data - handle per UK GDPR / GDPR").font = font(size=11)
+        r += 1
+        srow("Contains", "Usernames, real names, email, department, IP addresses")
+        srow("Requested by", env("J_REQUESTED_BY", ""))
+        srow("Advice", "If this is a customer tenant, the customer is data controller. "
+             "Ensure a documented lawful basis exists before sharing.")
+
+        # Devices
+        ws2 = wb.create_sheet("Devices")
+        conf_fill = {"High": WHITE, "Medium": YELLOW, "Low": YELLOW, "None": RED}
+        dev_rows = [device_row(rec, s) for rec, s, _ in matched]
+        fills = [RED if s["conflict"] else conf_fill.get(s["confidence"], WHITE) for _, s, _ in matched]
+        table(ws2, DEV_COLS, dev_rows, fills)
+        url_col = len(DEV_COLS)
+        for ri, vals in enumerate(dev_rows, 2):
+            if vals[-1]:
+                cell = ws2.cell(row=ri, column=url_col)
+                cell.hyperlink = vals[-1]
+                cell.font = font(colour="0563C1", underline="single")
+
+        # Local Accounts
+        acct_rows = []
+        for rec, _, _ in matched:
+            for acct in (rec.get("localUserAccounts") or []):
+                home = acct.get("homeDirectorySizeMb")
+                acct_rows.append([
+                    computer_id(rec), g(rec, "general", "name") or "",
+                    g(rec, "hardware", "serialNumber") or "",
+                    acct.get("username") or "", acct.get("fullName") or "",
+                    "Yes" if acct.get("admin") else "No",
+                    acct.get("userAccountType") or "",
+                    "" if home in (None, -1) else home,
+                    "Yes" if acct.get("fileVault2Enabled") else "No",
+                    acct.get("azureActiveDirectoryId") or "",
+                ])
+        table(wb.create_sheet("Local Accounts"), [
+            "Device ID", "Device Name", "Serial", "Username", "Full Name", "Admin",
+            "Type", "Home Dir (MB)", "FileVault Enabled", "Azure AD ID"], acct_rows)
+
+        # User History
+        hist_rows = []
+        for rec, _, hist in matched:
+            for e in hist:
+                hist_rows.append([
+                    computer_id(rec), g(rec, "general", "name") or "",
+                    g(rec, "hardware", "serialNumber") or "",
+                    fmt_date(e.get("date_time_utc")) or e.get("date_time") or "",
+                    e.get("username") or "", e.get("full_name") or "",
+                    e.get("email_address") or "", e.get("department") or "",
+                    e.get("building") or "", e.get("position") or "",
+                ])
+        ws4 = wb.create_sheet("User History")
+        table(ws4, ["Device ID", "Device Name", "Serial", "Date", "Username", "Full Name",
+                    "Email", "Department", "Building", "Position"], hist_rows)
+        if not hist_rows:
+            note = ("(history skipped - run with --history)" if env("J_HISTORY") != "1"
+                    else "(no user or location changes recorded for these devices)")
+            ws4.cell(row=2, column=1, value=note).font = font(colour="888888")
+
+        # Not Obtainable
+        ws5 = wb.create_sheet("Not Obtainable")
+        ws5.column_dimensions["A"].width = 32
+        ws5.column_dimensions["B"].width = 72
+        for col, label in ((1, "Data point"), (2, "Why it does not exist in Jamf Pro")):
+            c = ws5.cell(row=1, column=col, value=label)
+            c.font = font(bold=True, colour=WHITE); c.fill = fill(BLUE)
+            c.border = border(DARK_BLUE); c.alignment = Alignment(vertical="center")
+        ws5.row_dimensions[1].height = 28
+        NOT_OBTAINABLE = [
+            ("Login timestamps",
+             "Jamf Pro does not record macOS login or logout events. The Computer History "
+             "'Usage Logs' subset depended on login/logout hooks, which are unsupported on "
+             "modern macOS. Expect this data to be absent for all devices. To capture login "
+             "events going forward, deploy Jamf Protect telemetry."),
+            ("Login history (who logged in, when)",
+             "No retroactive login history is available. This report uses device state "
+             "(local accounts, FileVault users, MDM-capable accounts) to attribute "
+             "ownership, which is the best available substitute from inventory data alone."),
+            ("IP address history",
+             "Jamf Pro stores only the most recent reported IPs (lastReportedIpV4 / "
+             "lastIpAddress). No historical record of past addresses is retained. The "
+             "current IPs are included in the Devices sheet for reference."),
+            ("Application usage history",
+             "Application usage data is only available if the 'Application Usage' "
+             "collection setting was enabled before the period of interest "
+             "(Settings > Computer Management > Inventory Collection > Application Usage). "
+             "It is not retroactive and is not included in this report."),
+            ("Real-time location / network path",
+             "Jamf Pro holds no current or historical network location data beyond the "
+             "last-reported IP. Physical location must be inferred from assigned user, "
+             "department, and building fields - all editable manually and not verified."),
         ]
-        for ci, v in enumerate(vals, 1):
-            cell = ws3.cell(row=ar, column=ci, value=v)
-            cell.border = border()
-            cell.alignment = Alignment(vertical="center")
-        ar += 1
-autofit(ws3)
-ws3.freeze_panes = "A2"
+        for ri, (point, reason) in enumerate(NOT_OBTAINABLE, 2):
+            ws5.cell(row=ri, column=1, value=point).font = font(bold=True)
+            c = ws5.cell(row=ri, column=2, value=reason)
+            c.alignment = Alignment(wrap_text=True, vertical="top")
+            ws5.row_dimensions[ri].height = 70
+            for col in (1, 2):
+                ws5.cell(row=ri, column=col).border = border()
 
-# ── User History ─────────────────────────────────────────────────────────────
-ws4 = wb.create_sheet("User History")
-HIST_COLS = [
-    "Device ID", "Device Name", "Serial",
-    "Date", "Username", "Full Name",
-    "Email", "Department", "Building", "Position",
-]
-hdr_row(ws4, HIST_COLS)
-hr = 2
-for rec, _, hist_entries in matched:
-    g  = rec.get("general") or {}
-    hw = rec.get("hardware") or {}
-    dev_id   = str(g.get("id") or rec.get("id") or "")
-    dev_name = g.get("name") or ""
-    serial   = hw.get("serialNumber") or ""
-    for entry in hist_entries:
-        vals = [
-            dev_id, dev_name, serial,
-            entry.get("date_time_entered") or entry.get("dateEntered") or "",
-            entry.get("username") or "",
-            entry.get("full_name") or entry.get("fullName") or "",
-            entry.get("email_address") or entry.get("email") or "",
-            entry.get("department") or "",
-            entry.get("building") or "",
-            entry.get("position") or "",
-        ]
-        for ci, v in enumerate(vals, 1):
-            cell = ws4.cell(row=hr, column=ci, value=v)
-            cell.border = border()
-            cell.alignment = Alignment(vertical="center")
-        hr += 1
-if hr == 2:
-    c = ws4.cell(row=2, column=1, value="(no history entries - use --history flag or none collected)")
-    c.font = font(colour="888888")
-autofit(ws4)
-ws4.freeze_panes = "A2"
+        written = out_base + ".xlsx"
+        wb.save(written)
 
-# ── Not Obtainable ────────────────────────────────────────────────────────────
-ws5 = wb.create_sheet("Not Obtainable")
-ws5.column_dimensions["A"].width = 32
-ws5.column_dimensions["B"].width = 72
-for col, label in ((1, "Data point"), (2, "Why it does not exist in Jamf Pro")):
-    c = ws5.cell(row=1, column=col, value=label)
-    c.font = font(bold=True, colour=WHITE); c.fill = fill(BLUE)
-    c.border = border(DARK_BLUE); c.alignment = Alignment(vertical="center")
-ws5.row_dimensions[1].height = 28
-
-NOT_OBTAINABLE = [
-    ("Login timestamps",
-     "Jamf Pro does not record macOS login or logout events. The Computer History "
-     "'Usage Logs' subset depended on login/logout hooks, which are unsupported on "
-     "modern macOS. Expect this data to be absent for all devices. To capture login "
-     "events going forward, deploy Jamf Protect telemetry."),
-    ("Login history (who logged in, when)",
-     "No retroactive login history is available. This report uses device state "
-     "(local accounts, FileVault users, MDM-capable accounts) to attribute "
-     "ownership, which is the best available substitute from inventory data alone."),
-    ("IP address history",
-     "Jamf Pro stores only the most recent reported IP (lastReportedIp / "
-     "lastIpAddress). No historical record of past addresses is retained. The "
-     "current IP is included in the Devices sheet for reference."),
-    ("Application usage history",
-     "Application usage data is only available if the 'Application Usage' "
-     "collection setting was enabled before the period of interest "
-     "(Settings > Computer Management > Inventory Collection > Application Usage). "
-     "It is not retroactive and is not included in this report."),
-    ("Real-time location / network path",
-     "Jamf Pro holds no current or historical network location data beyond the "
-     "last-reported IP. Physical location must be inferred from assigned user, "
-     "department, and building fields - all editable manually and not verified."),
-]
-for ri, (point, reason) in enumerate(NOT_OBTAINABLE, 2):
-    ws5.cell(row=ri, column=1, value=point).font = font(bold=True)
-    c = ws5.cell(row=ri, column=2, value=reason)
-    c.alignment = Alignment(wrap_text=True, vertical="top")
-    ws5.row_dimensions[ri].height = 70
-    for col in (1, 2):
-        ws5.cell(row=ri, column=col).border = border()
-
-wb.save(xlsx_path)
-
-print(f"  XLSX: {xlsx_path}")
-print(f"  Matched: {len(matched)}  "
-      f"High={conf_dist.get('High',0)}  "
-      f"Medium={conf_dist.get('Medium',0)}  "
-      f"Low={conf_dist.get('Low',0)}  "
-      f"None={conf_dist.get('None',0)}  "
-      f"Conflicts={conflict_count}")
+print(json.dumps({
+    "matched": len(matched),
+    "confidence": {k: conf_dist.get(k, 0) for k in ("High", "Medium", "Low", "None")},
+    "conflicts": conflict_count,
+    "history_rows": history_rows,
+    "written": written,
+}))
 PYEOF
 }
 
-# Run the scorer against the current instance's inventory + history files.
-run_scorer() {
-    local inst_slug="$1"
-    local inv_file="$workdir/inventory.json"
-    local hist_file="$workdir/history.json"
-
-    # Get matched device IDs for history fetch
-    local ids_file="$workdir/matched_ids.txt"
-    local filter_json
-    filter_json=$(/usr/bin/python3 -c "
-import json, sys
-print(json.dumps({
-    'model_filter':  sys.argv[1],
-    'chip_filter':   sys.argv[2],
-    'enrolled_from': sys.argv[3],
-    'enrolled_to':   sys.argv[4],
-    'date_basis':    sys.argv[5],
-    'instance':      sys.argv[6],
-    'operator':      sys.argv[7],
-    'run_ts':        sys.argv[8],
-    'requested_by':  '',
-}))
-" "$filter_model" "$filter_chip" "$enrolled_from" "$enrolled_to" \
-  "$date_basis" "$jss_instance" "${USER:-unknown}" \
-  "$(/bin/date '+%Y-%m-%d %H:%M')" 2>/dev/null)
-
-    # Extract matched IDs (for history fetch)
-    /usr/bin/python3 -c "
-import json, sys, re
-from datetime import datetime, timezone
-
-inv = json.load(open(sys.argv[1])).get('results', [])
-filt = json.loads(sys.argv[2])
-model_f = (filt.get('model_filter') or '').lower()
-chip_f  = (filt.get('chip_filter') or '').lower()
-enr_from = filt.get('enrolled_from') or ''
-enr_to   = filt.get('enrolled_to') or ''
-basis    = filt.get('date_basis') or 'enrollment'
-APPLE_KW = {'apple','silicon','m1','m2','m3','m4','m5'}
-
-def tz(dt):
-    return dt.replace(tzinfo=timezone.utc) if dt and not dt.tzinfo else dt
-
-def parse(s):
-    if not s: return None
-    try:
-        return datetime.fromisoformat(re.sub(r'\.\d+','',str(s)).replace('Z','+00:00'))
-    except: return None
-
-def in_range(dt, lo, hi):
-    if not dt: return True
-    dt = tz(dt)
-    if lo:
-        lo = tz(parse(lo))
-        if lo and dt < lo: return False
-    if hi:
-        hi = tz(parse(hi))
-        if hi and dt > hi: return False
-    return True
-
-for rec in inv:
-    hw = rec.get('hardware') or {}
-    g  = rec.get('general') or {}
-    if model_f and model_f not in (hw.get('model','') or hw.get('modelIdentifier','')).lower():
-        continue
-    if chip_f:
-        proc = (hw.get('processorType') or '').lower()
-        if chip_f not in proc:
-            if chip_f in APPLE_KW and hw.get('appleSilicon'): pass
-            else: continue
-    raw = (g.get('enrollmentDate') or g.get('initialEntryDate') or '') if basis == 'enrollment' \
-          else (g.get('initialEntryDate') or g.get('enrollmentDate') or '')
-    if not in_range(parse(raw), enr_from, enr_to):
-        continue
-    print(str(g.get('id') or rec.get('id') or ''))
-" "$inv_file" "$filter_json" > "$ids_file" 2>/dev/null
-
-    local matched_count
-    matched_count=$(/usr/bin/wc -l < "$ids_file" | /usr/bin/tr -d ' ')
-    echo "  Devices matching filters: ${matched_count}"
-
-    if [[ $matched_count -eq 0 ]]; then
-        echo "  No devices matched the specified filters."
-        return
+# print one raw inventory record and its user/location history
+run_probe() {
+    local cid
+    echo "   Raw inventory record (first computer, all sections used):"
+    fetch_inventory_list GENERAL HARDWARE USER_AND_LOCATION LOCAL_USER_ACCOUNTS \
+        DISK_ENCRYPTION OPERATING_SYSTEM | "$jq_bin" '.[0] // .results[0] // empty'
+    cid=$(fetch_inventory_list GENERAL | "$jq_bin" -r '(.[0] // .results[0]).id // empty' 2>/dev/null)
+    if [[ -n "$cid" ]]; then
+        echo
+        echo "   User and location history for computer ID $cid:"
+        jc pro classic-computer-history get "$cid" --subset UserLocation -o json 2>/dev/null
     fi
-
-    # History
-    if [[ $do_history -eq 1 ]]; then
-        fetch_history "$ids_file"
-    else
-        echo "{}" > "$workdir/history.json"
-    fi
-
-    # Output paths
-    local ts
-    ts=$(/bin/date '+%Y-%m-%d-%H%M')
-    local base="${output_dir}/macOS-Attribution-${inst_slug}-${ts}"
-    local xlsx_path="${base}.xlsx"
-    local csv_path="${base}_devices.csv"
-
-    if [[ $dry_run -eq 1 ]]; then
-        echo "  (dry run) would write:"
-        echo "    ${xlsx_path}"
-        echo "    ${csv_path}"
-        return
-    fi
-
-    "$mjt_python" "$workdir/score.py" \
-        "$inv_file" \
-        "$workdir/history.json" \
-        "$xlsx_path" \
-        "$csv_path" \
-        "$filter_json"
 }
 
-# Interactive filter collection (only prompts for values not supplied by flags)
-collect_filters() {
-    [[ $assume_yes -eq 1 || ! -t 0 ]] && return
-
-    section "Filters"
-    echo "  Press Enter to skip any filter (no filter = all macOS devices)"
-    echo
-
-    [[ -z "$filter_model" ]]  && ask "Model substring (e.g. MacBook Air)" filter_model ""
-    [[ -z "$filter_chip" ]]   && ask "Chip/processor substring (e.g. Apple, M3)" filter_chip ""
-    [[ -z "$enrolled_from" ]] && ask "Enrolled from (YYYY-MM-DD, or blank)" enrolled_from ""
-    [[ -z "$enrolled_to" ]]   && ask "Enrolled to   (YYYY-MM-DD, or blank)" enrolled_to ""
-
-    if [[ -z "$enrolled_from$enrolled_to" ]]; then
-        date_basis="enrollment"
-    elif [[ "$date_basis" == "enrollment" || "$date_basis" == "initial-entry" ]]; then
-        : # already set
-    else
-        ask "Date basis: enrollment or initial-entry" date_basis "enrollment"
+# fill $members_file with group member IDs (group targets only)
+resolve_group() {
+    : > "$members_file"
+    [[ "$target_mode" != "group" ]] && return 0
+    if ! jc pro classic-computer-groups get --name "$group_name" --output json 2>/dev/null \
+        | "$jq_bin" -r '(.computer_group // .) | (.computers // [])[] | .id' > "$members_file" 2>/dev/null \
+        || [[ ! -s "$members_file" ]]; then
+        if [[ $interactive -eq 1 ]]; then
+            echo "   Group \"$group_name\" not found or empty on $jss_instance."
+            choose_computer_group || return 1
+            resolve_group
+            return
+        fi
+        echo "   ERROR: group \"$group_name\" not found or empty."
+        return 1
     fi
+    echo "   Group \"$group_name\": $(/usr/bin/grep -c . "$members_file") member(s)."
+}
+
+run_score() {
+    J_MODE="$target_mode" J_VALUES=$(printf '%s\n' "${target_values[@]}") \
+    J_MODEL="$filter_model" J_CHIP="$filter_chip" J_FROM="$enrolled_from" J_TO="$enrolled_to" \
+    J_BASIS="$date_basis" J_INSTANCE="$jss_instance" J_HISTORY="$do_history" \
+    J_OPERATOR="${USER:-unknown}" J_RUN_TS="$run_ts" J_TARGET_DESC="$target_desc" \
+    J_REQUESTED_BY="$requested_by" \
+        "$mjt_python" "${workdir}/score.py" "$inventory_json" "$members_file" "$hist_dir" "$@"
+}
+
+fetch_history() {
+    local total n=0 cid
+    total=$(/usr/bin/grep -c . "$ids_file")
+    while IFS= read -r cid; do
+        [[ -z "$cid" ]] && continue
+        n=$((n + 1))
+        printf '\r   Fetching user and location history: %d of %d' "$n" "$total"
+        jc pro classic-computer-history get "$cid" --subset UserLocation -o json \
+            > "${hist_dir}/${cid}.json" 2>/dev/null
+    done < "$ids_file"
     echo
 }
 
-# Process one instance: fetch, score, output
 process_instance() {
-    local inst_slug
-    inst_slug=$(instance_slug "$jss_instance")
+    local inst_workdir summary out_base=""
+    inst_workdir="${workdir}/$(instance_slug "$jss_instance")"
+    inventory_json="${inst_workdir}/inventory.json"
+    members_file="${inst_workdir}/members.txt"
+    ids_file="${inst_workdir}/ids.txt"
+    hist_dir="${inst_workdir}/history"
+    /bin/mkdir -p "$hist_dir"
 
     if [[ $probe -eq 1 ]]; then
         run_probe
         return
     fi
 
-    section "Fetching inventory: ${jss_instance}"
-    fetch_inventory "$inst_slug"
+    resolve_group || return 1
+    echo "   Fetching computer inventory..."
+    fetch_inventory_list GENERAL HARDWARE USER_AND_LOCATION LOCAL_USER_ACCOUNTS \
+        DISK_ENCRYPTION OPERATING_SYSTEM > "$inventory_json"
+    if [[ ! -s "$inventory_json" ]]; then
+        echo "   ERROR: could not read computer inventory."
+        return 1
+    fi
 
-    section "Scoring: ${jss_instance}"
-    run_scorer "$inst_slug"
+    if ! run_score ids "" > "$ids_file" 2>"${inst_workdir}/score.log"; then
+        echo "   ERROR: could not filter the inventory."
+        /usr/bin/sed 's/^/      /' "${inst_workdir}/score.log"
+        return 1
+    fi
+    if [[ ! -s "$ids_file" ]]; then
+        echo "   No computers match the targets and filters."
+        return 0
+    fi
+    echo "   $(/usr/bin/grep -c . "$ids_file") computer(s) match."
+
+    [[ "$do_history" -eq 1 ]] && fetch_history
+
+    [[ $dry_run -eq 0 ]] && out_base="${output_dir}/report-macos-attribution_$(url_host "$jss_instance")_${timestamp}"
+    if ! summary=$(run_score report "$out_base" 2>"${inst_workdir}/score.log"); then
+        echo "   ERROR: could not build the report."
+        /usr/bin/sed 's/^/      /' "${inst_workdir}/score.log"
+        return 1
+    fi
 
     echo
-    echo "  Done: ${jss_instance}"
+    /usr/bin/python3 - "$summary" <<'PY'
+import json, sys
+s = json.loads(sys.argv[1])
+c = s["confidence"]
+print(f"   Computers:          {s['matched']}")
+print(f"   Confidence:         High {c['High']}   Medium {c['Medium']}   Low {c['Low']}   None {c['None']}")
+print(f"   Conflicts:          {s['conflicts']}")
+print(f"   History entries:    {s['history_rows']}")
+PY
+    written=$(printf '%s' "$summary" | "$jq_bin" -r '.written // empty')
+    [[ -n "$written" ]] && written_files+=("$written")
 }
 
-# --------------------------------------------------------------------------------
-# MAIN
-# --------------------------------------------------------------------------------
+choose_targets() {
+    choose_from_menu 1 "Which Macs?" \
+        "All computers" \
+        "Specific Macs (serial number, name or group)" || exit 1
+    if [[ "$menu_choice" -eq 1 ]]; then
+        target_mode="all"
+        return 0
+    fi
+    # the group picker reads from the first instance
+    token_for_instance "${instance_choice_array[0]}" || exit 1
+    choose_device_targets || exit 1
+}
 
-while [[ "$#" -gt 0 ]]; do
-    key="$1"
-    case $key in
-        --model)             shift; filter_model="$1" ;;
-        --chip)              shift; filter_chip="$1" ;;
-        --enrolled-from)     shift; enrolled_from="$1" ;;
-        --enrolled-to)       shift; enrolled_to="$1" ;;
-        --date-basis)        shift; date_basis="$1" ;;
-        --history)           do_history=1 ;;
-        --no-history)        do_history=0 ;;
-        -o|--output-dir|--out) shift; output_dir="$1" ;;
-        --probe)             probe=1 ;;
-        -il|--instance-list) shift; chosen_instance_list_file="$1" ;;
-        -i|--instance)       shift; chosen_instances+=("$1") ;;
-        -a|--all)            all_instances=1 ;;
-        --id|--client-id|--user|--username) shift; chosen_id="$1" ;;
-        -x|--nointeraction)  no_interaction=1; assume_yes=1 ;;
-        -n|--dry-run)        dry_run=1 ;;
-        -y|--yes)            assume_yes=1 ;;
-        -v|--verbose)        verbose=1 ;;
-        -h|--help)           usage; exit 0 ;;
-        *) echo "Unknown option: $1"; usage; exit 1 ;;
-    esac
-    shift
-done
+# -------------------------------------------------------------------------
+# INSTANCE SELECTION
+# -------------------------------------------------------------------------
 
-# openpyxl is optional (formatted .xlsx report, else the CSV only)
-ensure_dependencies "openpyxl?"
+ensure_dependencies jamf-cli jq "openpyxl?" || exit 1
 
-# Working directory
-workdir=$(/usr/bin/mktemp -d /tmp/report-macos-attribution-XXXXXX)
-trap '/bin/rm -rf "${workdir}"' EXIT
-
-echo
-echo "macOS Attribution Report"
-[[ $dry_run -eq 1 ]] && echo "(dry run - no output files will be written)"
-[[ $do_history -eq 1 ]] && echo "History: on (use --no-history to skip)" || echo "History: off"
-echo
+workdir=$(/usr/bin/mktemp -d "${output_location:-/tmp}/report-macos-attribution.XXXXXX")
+trap 'remove_jamfcli_token; /bin/rm -rf "$workdir"' EXIT
+write_scorer
 
 announce_instances
-
 choose_destination_instances
-collect_filters
+if [[ ${#instance_choice_array[@]} -eq 0 ]]; then
+    echo "ERROR: no instance selected."
+    exit 1
+fi
+
+# -------------------------------------------------------------------------
+# TARGETS
+# -------------------------------------------------------------------------
+
+if [[ $probe -eq 0 && $interactive -eq 1 && -z "$target_mode" ]]; then
+    choose_targets
+fi
+
+case "$target_mode" in
+    serial)     target_desc="Serial(s) ${target_values[*]}" ;;
+    name)       target_desc="Name(s) ${target_values[*]}" ;;
+    name-match) target_desc="Names containing '${target_values[0]}'" ;;
+    group)      target_desc="Group '$group_name'" ;;
+    *)          target_desc="All computers" ;;
+esac
+
+if [[ $probe -eq 0 ]]; then
+    filters_desc=()
+    [[ -n "$filter_model" ]] && filters_desc+=("model '$filter_model'")
+    [[ -n "$filter_chip" ]] && filters_desc+=("chip '$filter_chip'")
+    [[ -n "$enrolled_from" ]] && filters_desc+=("enrolled >= $enrolled_from")
+    [[ -n "$enrolled_to" ]] && filters_desc+=("enrolled <= $enrolled_to")
+    [[ "$date_basis" == "initial-entry" && -n "$enrolled_from$enrolled_to" ]] && filters_desc+=("(initial entry date)")
+    echo
+    echo "   Targets:   $target_desc"
+    echo "   Filters:   ${filters_desc[*]:-none}"
+    echo "   History:   $( [[ "$do_history" -eq 1 ]] && echo included || echo skipped )"
+    echo "   Instances: ${#instance_choice_array[@]}"
+    [[ $dry_run -eq 1 ]] && echo "   Dry-run:   no report will be written"
+fi
+
+# -------------------------------------------------------------------------
+# OUTPUT
+# -------------------------------------------------------------------------
+
 if [[ $dry_run -eq 0 && $probe -eq 0 ]]; then
     choose_output_dir || exit 1
 fi
-write_scorer
+timestamp=$(/bin/date '+%Y%m%d-%H%M%S')
+run_ts=$(/bin/date '+%Y-%m-%d %H:%M')
+written_files=()
 
-for instance in "${instance_choice_array[@]}"; do
-    jss_instance="$instance"
-    if [[ "$chosen_id" ]]; then
-        set_credentials "$jss_instance" "$chosen_id"
-    else
-        set_credentials "$jss_instance"
+for jss_instance in "${instance_choice_array[@]}"; do
+    section "$jss_instance"
+    if ! token_for_instance "$jss_instance"; then
+        echo "   Could not get a token. Skipping."
+        returncode=1
+        continue
     fi
-    check_token || { echo "  Could not obtain token for ${jss_instance}. Skipping."; returncode=1; continue; }
-    process_instance
+    process_instance || returncode=1
+    remove_jamfcli_token
 done
 
 echo
-[[ -n "$output_dir" ]] && echo "Output directory: ${output_dir}"
-echo "Finished"
+if [[ ${#written_files[@]} -gt 0 ]]; then
+    echo "Report(s) written to:"
+    printf '   %s\n' "${written_files[@]}"
+elif [[ $dry_run -eq 1 ]]; then
+    echo "Dry-run: no report written."
+fi
 echo
-exit "${returncode:-0}"
+exit "$returncode"
