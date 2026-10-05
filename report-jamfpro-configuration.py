@@ -1181,48 +1181,24 @@ def _term_table(headers: list[str], rows: list[list], title: str = "") -> None:
 # ── Progress display ──────────────────────────────────────────────────────────
 
 def _progress(current: int, total: int, label: str, width: int = 30) -> None:
-    """Print a two-line progress bar to stderr.
+    """Print a single-line progress bar to stderr.
 
     Format:
-      [##########----------]  50%  Level 2 Diagnostic  (5/10)
-      > ... Jamf Connect Settings
+      43%  ████████████░░░░░░░░░░░░░░░░░░  142/328
 
-    Diagnostic-level annotation (TNG flavour): the bar line carries a
-    rotating "Level N Diagnostic" tag that advances with the percentage —
-    Level 1 below 33%, Level 2 below 66%, Level 3 above. Decorative only;
-    no functional behaviour depends on it.
-
-    Overwrites both lines each tick. Leaves them on screen at 100%.
+    Overwrites the line each tick. Leaves it on screen at 100%.
     """
     if total == 0:
         return
     pct = current / total
-    if pct < 0.33:
-        level = "Level 1 Diagnostic"
-    elif pct < 0.66:
-        level = "Level 2 Diagnostic"
-    else:
-        level = "Level 3 Diagnostic"
     filled = int(width * pct)
-    bar = "#" * filled + "-" * (width - filled)
-    term_width = shutil.get_terminal_size((120, 40)).columns
-    max_label = max(20, term_width - 8)
-    short = label[:max_label]
-    bar_line  = f"  [{bar}] {int(pct*100):3d}%  {level}  ({current}/{total})"
-    label_line = f"  > {short}"
+    bar = "█" * filled + "░" * (width - filled)
+    bar_line = f"  {int(pct*100):3d}%  {bar}  {current}/{total}"
 
-    if current == 1:
-        # First tick — print both lines fresh (no lines to overwrite yet)
-        print(bar_line,   file=sys.stderr, flush=True)
-        print(label_line, end="\r" if total > 1 else "\n", file=sys.stderr, flush=True)
-    elif current >= total:
-        # Final tick — move up, reprint both, leave cursor after label line
-        print(f"\033[1A\033[2K{bar_line}", file=sys.stderr, flush=True)
-        print(f"\033[2K{label_line}",      file=sys.stderr, flush=True)
+    if current >= total:
+        print(f"\033[2K{bar_line}", file=sys.stderr, flush=True)
     else:
-        # Mid-progress — move up past label line, reprint both
-        print(f"\033[1A\033[2K{bar_line}", file=sys.stderr, flush=True)
-        print(f"\033[2K{label_line}",      end="\r", file=sys.stderr, flush=True)
+        print(f"\033[2K{bar_line}", end="\r", file=sys.stderr, flush=True)
 
 
 def _section_start(name: str) -> None:
@@ -4369,20 +4345,13 @@ else:
 _UI_W = 36
 
 def _ui_hbar(width: int = _UI_W) -> None:
-    """Blue ── horizontal rule, width characters wide."""
-    print(f"{_UI_BLUE}{'─' * width}{_UI_NC}")
+    pass
 
 def _ui_section(title: str, width: int = _UI_W) -> None:
-    """Blue section bar: ── Title ──────────────────"""
-    # 4 = len('── ') + ' '. Matches Launcher.command section_line.
-    trail = "─" * max(0, width - 4 - len(title))
-    print(f"{_UI_BLUE}── {title} {trail}{_UI_NC}")
+    print(f"\n{title}")
 
 def _ui_menu_line(num: object, label: str, suffix: str = "") -> None:
-    """Render a Launcher-style menu row: ' 1 │ Item Name'."""
-    # Numeric items get %2d alignment; letters / 'q' / '?' get a 2-char pad too.
-    num_s = f"{int(num):2d}" if isinstance(num, int) or (isinstance(num, str) and num.isdigit()) else f"{str(num):>2}"
-    print(f" {num_s} {_UI_BLUE}│{_UI_NC} {label}{suffix}")
+    print(f"   [{num}] {label}{suffix}")
 
 
 def _prompt_dataset() -> str:
@@ -4393,7 +4362,7 @@ def _prompt_dataset() -> str:
         _ui_menu_line(int(key), label)
     print()
     _ui_hbar()
-    choice = input(f"  Choose [1-{len(DATASETS)}]: ").strip()
+    choice = input(f"   Choose by number [1]: ").strip()
     return DATASETS.get(choice, ("macOS - Config Profiles - Scope", "config-profiles-scope"))[1]
 
 
@@ -4437,7 +4406,7 @@ def _prompt_profile() -> str | None:
     _ui_hbar()
 
     # Default choice: the first entry, which is the jamf-cli default if one exists.
-    choice = input(f"  Choose number or name [default: 1]: ").strip()
+    choice = input(f"   Choose by number or name [1]: ").strip()
 
     # Empty → default.
     if not choice:
@@ -4572,7 +4541,7 @@ def _prompt_sheet_selection() -> set[str]:
     print(f"  {_UI_DIM}Enter sheet numbers (e.g. 1,3,5  or  1-7,10){_UI_NC}")
     print(f"  {_UI_DIM}Press Enter for ALL sheets (default).{_UI_NC}")
     print()
-    raw = input("  Choose: ").strip().lower()
+    raw = input("   Choose by number: ").strip().lower()
 
     all_names = {label for _, label in SHEET_MENU}
     if not raw or raw == "all":
