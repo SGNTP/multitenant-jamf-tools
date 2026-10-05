@@ -627,6 +627,73 @@ if out_path:
         for r in sorted(rows, key=lambda r: (order.get(r[4], 9), r[0].lower())):
             w.writerow(project(r))
 
+details_path = sys.argv[8] if len(sys.argv) > 8 else ""
+if details_path:
+    valid_label = {"valid": "Deployed", "invalid": "Pending", "unknown": "Pending",
+                   "failure": "Failed"}
+    with open(details_path, "w", newline="") as df:
+        dw = csv.writer(df)
+        dw.writerow(["Device Name", "Declaration", "Status",
+                     "Reason Code", "Reason Description", "Predicate"])
+        for t in targets:
+            if t["ddm"] == "false":
+                continue
+            sp = os.path.join(status_dir, f'{t["mgmt"]}.json')
+            if not os.path.exists(sp):
+                continue
+            try:
+                with open(sp) as jf:
+                    all_items = load_status_items(json.load(jf))
+            except (OSError, ValueError):
+                continue
+            for it in all_items:
+                if not is_declaration_key(it.get("key")):
+                    continue
+                val = it.get("value")
+                entries = (parse_kv_blob(val) if isinstance(val, str)
+                           else val if isinstance(val, list)
+                           else [val] if isinstance(val, dict) else [])
+                for e in entries:
+                    if not isinstance(e, dict):
+                        continue
+                    ident = str(e.get("identifier") or e.get("id") or "")
+                    if not ident or (bp_id and bp_id not in ident):
+                        continue
+                    v = str(e.get("valid") or e.get("status") or "").lower()
+                    a = str(e.get("active", "")).lower()
+                    if v == "failure":
+                        slabel = "Failed"
+                    elif a == "false":
+                        slabel = "Inactive"
+                    else:
+                        slabel = valid_label.get(v, v or "Unknown")
+                    reasons = e.get("reasons") or e.get("reason") or []
+                    if isinstance(reasons, str):
+                        reasons_list = parse_kv_blob(reasons)
+                    elif isinstance(reasons, list):
+                        reasons_list = [r for r in reasons if isinstance(r, dict)]
+                    elif isinstance(reasons, dict):
+                        reasons_list = [reasons]
+                    else:
+                        reasons_list = []
+                    if reasons_list:
+                        for r in reasons_list:
+                            code = str(r.get("code") or "")
+                            desc = str(r.get("description") or "")
+                            pred = ""
+                            det = r.get("details") or {}
+                            if isinstance(det, str):
+                                for d2 in parse_kv_blob(det):
+                                    pred = str(d2.get("Predicate") or
+                                               d2.get("predicate") or "")
+                            elif isinstance(det, dict):
+                                pred = str(det.get("Predicate") or
+                                           det.get("predicate") or "")
+                            dw.writerow([t["name"], ident, slabel,
+                                         code, desc, pred])
+                    else:
+                        dw.writerow([t["name"], ident, slabel, "", "", ""])
+
 summary = {
     "blueprint_id": bp_id,
     "devices_total": len(targets),
@@ -769,11 +836,14 @@ fetch_statuses() {
     while IFS=$'\t' read -r mgmt name ddm rest; do
         [[ -z "$mgmt" ]] && continue
         n=$((n + 1))
-        printf '\r   Fetching DDM status: %d of %d' "$n" "$total"
-        [[ "$ddm" == "false" ]] && continue
+        if [[ "$ddm" == "false" ]]; then
+            printf '\r\033[K   Fetching DDM status: %d of %d (skipped, DDM off)' "$n" "$total"
+            continue
+        fi
+        printf '\r\033[K   Fetching DDM status: %d of %d' "$n" "$total"
         jc pro declarative-device-management status-items "$mgmt" --output json > "${status_dir}/${mgmt}.json" 2>/dev/null
     done < "$targets_file"
-    echo
+    printf '\r\033[K   Fetched DDM status: %d device(s).\n' "$total"
 }
 
 # sets $blueprint_id, or leaves it empty for the per-declaration report
@@ -783,7 +853,7 @@ choose_blueprint() {
     while IFS=$'\t' read -r c b; do
         [[ -z "$b" ]] && continue
         ids+=("$b"); labels+=("$b   ($c computer(s))")
-    done < <(/usr/bin/python3 "${workdir}/blueprint_menu.py" "$status_dir" 2>/dev/null)
+    done < "${inst_workdir}/blueprints.tsv"
 
     [[ ${#ids[@]} -eq 0 ]] && echo "   No blueprints found on the target computers."
     choose_from_menu "" "Report on (blueprints deployed to the targets on $jss_instance):" \
@@ -796,6 +866,16 @@ choose_blueprint() {
     elif [[ "$menu_choice" -eq $(( ${#ids[@]} + 1 )) ]]; then
         read -r -p "   Blueprint ID: " blueprint_id
         blueprint_id=$(printf '%s' "$blueprint_id" | /usr/bin/tr -d '[:space:]')
+    fi
+    if [[ -n "$blueprint_id" ]]; then
+        local bp_url="${jss_url}/view/mfe/blueprints/${blueprint_id}"
+        echo "   Blueprint URL: ${bp_url}"
+        if [[ $interactive -eq 1 ]]; then
+            choose_from_menu 2 "Blueprint selected — open in browser to verify first?" \
+                "Yes, open in browser" \
+                "No, continue" || true
+            [[ "$menu_choice" -eq 1 ]] && /usr/bin/open "${bp_url}" 2>/dev/null
+        fi
     fi
     if [[ -z "$blueprint_id" && -z "$include_all" ]]; then
         choose_from_menu 1 "Declarations to include:" \
@@ -826,17 +906,68 @@ fetch_command_history() {
     echo
 }
 
+# Fetch the declaration payload JSON for every unique declaration in $blueprint_id.
+# Saves ${inst_workdir}/dss-decls/<uuid>.json for each. Skipped in dry-run.
+fetch_declaration_payloads() {
+    local dss_dir="${inst_workdir}/dss-decls" uuid uuids total
+    /bin/mkdir -p "$dss_dir"
+    uuids=$(/usr/bin/python3 - "$status_dir" "$blueprint_id" 2>/dev/null <<'PY'
+import sys, os, json, re
+status_dir, bp_id = sys.argv[1], sys.argv[2]
+UUID_RE = re.compile(
+    r'_([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})',
+    re.I)
+seen = set()
+for fn in (os.listdir(status_dir) if os.path.isdir(status_dir) else []):
+    if not fn.endswith('.json'):
+        continue
+    try:
+        with open(os.path.join(status_dir, fn)) as f:
+            obj = json.load(f)
+    except (OSError, ValueError):
+        continue
+    items = (obj if isinstance(obj, list)
+             else next((obj[k] for k in ('results', 'statusItems', 'status_items', 'items')
+                        if isinstance(obj.get(k), list)), []))
+    for it in items:
+        if not str(it.get('key') or '').lower().startswith('management.declarations.'):
+            continue
+        val = it.get('value')
+        entries = (val if isinstance(val, list) else [val] if isinstance(val, dict) else [])
+        for e in entries:
+            ident = str(e.get('identifier') or e.get('id') or '') if isinstance(e, dict) else ''
+            if bp_id and bp_id not in ident:
+                continue
+            m = UUID_RE.search(ident)
+            if m:
+                seen.add(m.group(1))
+for u in sorted(seen):
+    print(u)
+PY
+    )
+    [[ -z "$uuids" ]] && return
+    total=$(printf '%s\n' "$uuids" | /usr/bin/grep -c .)
+    echo "   Fetching declaration payloads: ${total}..."
+    while IFS= read -r uuid; do
+        [[ -z "$uuid" ]] && continue
+        /usr/bin/curl -s -H "Authorization: Bearer ${token}" \
+            "${jss_url}/api/v1/dss-declarations/${uuid}" \
+            > "${dss_dir}/${uuid}.json" 2>/dev/null
+    done <<< "$uuids"
+}
+
 aggregate_and_report() {
-    local out_arg="" summary_json mode_arg="blueprint" report_type="per-declaration" csv_file xlsx_file final_output
+    local out_arg="" summary_json mode_arg="blueprint" report_type="per-declaration" csv_file xlsx_file final_output details_csv=""
     [[ -n "$blueprint_id" ]] && report_type="blueprint"
     csv_file="${output_dir}/report-macos-blueprint-status_${report_type}_$(url_host "$jss_instance")_${timestamp}.csv"
     xlsx_file="${csv_file%.csv}.xlsx"
     [[ $dry_run -eq 0 ]] && out_arg="$csv_file"
+    [[ -n "$blueprint_id" && $dry_run -eq 0 ]] && details_csv="${csv_file%.csv}_details.csv"
 
     if [[ -n "$blueprint_id" ]]; then
         summary_json=$(/usr/bin/python3 "${workdir}/pivot.py" \
             "$targets_file" "$status_dir" "$cmdhist_dir" \
-            "$out_arg" "$blueprint_id" "report" "$stale_days" 2>"${inst_workdir}/aggregate.log")
+            "$out_arg" "$blueprint_id" "report" "$stale_days" "${details_csv}" 2>"${inst_workdir}/aggregate.log")
     else
         [[ "$include_all" -eq 1 ]] && mode_arg="all"
         summary_json=$(/usr/bin/python3 "${workdir}/aggregate.py" \
@@ -865,9 +996,114 @@ else:
 for status, count in (s.get("status_breakdown") or {}).items():
     print(f"      {status:24s} {count}")
 PY
+    if [[ -n "$blueprint_id" ]]; then
+        echo
+        echo "   Blueprint URL: ${jss_url}/view/mfe/blueprints/${blueprint_id}"
+        echo "   Re-run flag:   --blueprint-id ${blueprint_id}"
+    fi
 
     if [[ $dry_run -eq 0 ]]; then
         final_output=$(csv_to_xlsx "$csv_file" "$xlsx_file" "Blueprint Status" 0)
+        if [[ "${final_output##*.}" == "xlsx" && -s "${inst_workdir}/blueprints.tsv" ]]; then
+            "$mjt_python" - "$final_output" "${inst_workdir}/blueprints.tsv" 2>/dev/null <<'PY'
+import sys
+from openpyxl import load_workbook
+from openpyxl.styles import Font
+wb = load_workbook(sys.argv[1])
+ws = wb.create_sheet("Blueprints")
+ws.append(["Blueprint ID", "Computers"])
+ws.cell(row=1, column=1).font = Font(bold=True)
+ws.cell(row=1, column=2).font = Font(bold=True)
+with open(sys.argv[2]) as f:
+    for line in f:
+        line = line.rstrip('\n')
+        if not line:
+            continue
+        parts = line.split('\t', 1)
+        if len(parts) == 2:
+            count, bid = parts
+            try:
+                ws.append([bid, int(count)])
+            except ValueError:
+                ws.append([bid, count])
+ws.column_dimensions["A"].width = 40
+ws.column_dimensions["B"].width = 12
+wb.save(sys.argv[1])
+PY
+        fi
+        if [[ "${final_output##*.}" == "xlsx" && -s "$details_csv" ]]; then
+            "$mjt_python" - "$final_output" "$details_csv" 2>/dev/null <<'PY'
+import sys, csv
+from openpyxl import load_workbook
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
+wb = load_workbook(sys.argv[1])
+ws = wb.create_sheet("Declaration Details")
+with open(sys.argv[2], newline="") as f:
+    rows = list(csv.reader(f))
+widths = {}
+for r_idx, row in enumerate(rows, start=1):
+    ws.append(row)
+    for c_idx, val in enumerate(row, start=1):
+        widths[c_idx] = max(widths.get(c_idx, 0), len(str(val)))
+    if r_idx == 1:
+        for c_idx in range(1, len(row) + 1):
+            ws.cell(row=1, column=c_idx).font = Font(bold=True)
+for c_idx, w in widths.items():
+    ws.column_dimensions[get_column_letter(c_idx)].width = min(max(w + 2, 10), 80)
+ws.freeze_panes = "A2"
+wb.save(sys.argv[1])
+PY
+            /bin/rm -f "$details_csv"
+        fi
+        if [[ "${final_output##*.}" == "xlsx" && -d "${inst_workdir}/dss-decls" ]]; then
+            "$mjt_python" - "$final_output" "${inst_workdir}/dss-decls" 2>/dev/null <<'PY'
+import sys, os, json
+from openpyxl import load_workbook
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
+wb = load_workbook(sys.argv[1])
+dss_dir = sys.argv[2]
+rows = []
+for fn in sorted(os.listdir(dss_dir)):
+    if not fn.endswith('.json'):
+        continue
+    try:
+        with open(os.path.join(dss_dir, fn)) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        continue
+    for d in (data.get('declarations') or []):
+        dtype = str(d.get('type') or '')
+        group = str(d.get('group') or '').title()
+        pj = d.get('payloadJson') or '{}'
+        try:
+            payload = json.loads(pj) if isinstance(pj, str) else (pj or {})
+        except (ValueError, TypeError):
+            payload = {}
+        if payload and isinstance(payload, dict):
+            for k, v in payload.items():
+                val = json.dumps(v) if isinstance(v, (dict, list)) else str(v)
+                rows.append([dtype, group, k, val])
+        else:
+            rows.append([dtype, group, '', str(pj)])
+if rows:
+    ws = wb.create_sheet("Payload Settings")
+    header = ["Declaration Type", "Group", "Setting", "Value"]
+    ws.append(header)
+    for c_idx in range(1, len(header) + 1):
+        ws.cell(row=1, column=c_idx).font = Font(bold=True)
+    widths = {i + 1: len(h) for i, h in enumerate(header)}
+    for row in rows:
+        ws.append(row)
+        for c_idx, val in enumerate(row, start=1):
+            widths[c_idx] = max(widths.get(c_idx, 0), len(str(val)))
+    for c_idx, w in widths.items():
+        ws.column_dimensions[get_column_letter(c_idx)].width = min(max(w + 2, 10), 80)
+    ws.freeze_panes = "A2"
+wb.save(sys.argv[1])
+PY
+        fi
         written_files+=("$final_output")
     fi
 }
@@ -885,10 +1121,13 @@ process_instance() {
 
     resolve_targets || return 1
     fetch_statuses
+    /usr/bin/python3 "${workdir}/blueprint_menu.py" "$status_dir" 2>/dev/null \
+        > "${inst_workdir}/blueprints.tsv"
     if [[ -z "$blueprint_id_arg" ]]; then
         choose_blueprint || return 1
     fi
     include_all="${include_all:-0}"
+    [[ -n "$blueprint_id" && $dry_run -eq 0 ]] && fetch_declaration_payloads
     [[ -n "$blueprint_id" ]] && fetch_command_history
     aggregate_and_report
 }
