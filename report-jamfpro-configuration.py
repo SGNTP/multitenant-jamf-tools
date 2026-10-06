@@ -500,6 +500,7 @@ _check_dependencies()
 
 
 import argparse
+import concurrent.futures
 import csv
 import fnmatch
 import html
@@ -511,6 +512,8 @@ import plistlib
 import re
 import subprocess
 import sys
+import threading
+import time
 from datetime import datetime
 from typing import Any
 import shutil
@@ -1295,6 +1298,84 @@ def _lazy_raw_xml(fetch, *args):
         return box[0]
 
     return _get
+
+
+# ── Parallel pre-fetch helpers ─────────────────────────────────────────────────
+#
+# Workers=4, delay=0.15s → each worker rests 0.15s after completing a fetch,
+# giving a steady rate of ~4 requests/s — well below Jamf Pro's rate limits.
+# Progress is shown during the fetch phase; processing loops then read from
+# the returned dict and never call the API again.
+
+_PREFETCH_WORKERS = 4
+_PREFETCH_DELAY   = 0.15  # seconds between fetches per worker
+
+
+def _prefetch_parallel(
+    ids: list,
+    fetch_fn,
+    profile: str | None,
+) -> dict:
+    """Fetch fetch_fn(id, profile) for each id in parallel. Returns {id: result}."""
+    total = len(ids)
+    if total == 0:
+        return {}
+
+    results: dict = {}
+    _done = [0]
+    _lock = threading.Lock()
+
+    def _fetch(item_id):
+        try:
+            data = fetch_fn(item_id, profile)
+        except Exception:
+            data = {}
+        time.sleep(_PREFETCH_DELAY)
+        with _lock:
+            results[item_id] = data
+            _done[0] += 1
+            _progress(_done[0], total, "")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_PREFETCH_WORKERS) as ex:
+        concurrent.futures.wait([ex.submit(_fetch, i) for i in ids])
+
+    return results
+
+
+def _prefetch_parallel_pair(
+    ids: list,
+    fetch_fn_a,
+    fetch_fn_b,
+    profile: str | None,
+) -> dict:
+    """Fetch (fetch_fn_a, fetch_fn_b) for each id in parallel. Returns {id: (a, b)}."""
+    total = len(ids)
+    if total == 0:
+        return {}
+
+    results: dict = {}
+    _done = [0]
+    _lock = threading.Lock()
+
+    def _fetch(item_id):
+        try:
+            a = fetch_fn_a(item_id, profile)
+        except Exception:
+            a = {}
+        try:
+            b = fetch_fn_b(item_id, profile)
+        except Exception:
+            b = ""
+        time.sleep(_PREFETCH_DELAY)
+        with _lock:
+            results[item_id] = (a, b)
+            _done[0] += 1
+            _progress(_done[0], total, "")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_PREFETCH_WORKERS) as ex:
+        concurrent.futures.wait([ex.submit(_fetch, i) for i in ids])
+
+    return results
 
 
 def _resolve_raw_xml(raw_xml: Any) -> str:
@@ -4977,20 +5058,22 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
     _profile_items = [] if skip_profiles else selected
     if _profile_items:
         _section_start("Fetching config profile details")
+        _profile_cache = _prefetch_parallel_pair(
+            [p["id"] for p in _profile_items],
+            get_profile_json, get_profile_raw_xml, args.profile,
+        )
+    else:
+        _profile_cache = {}
     for _pi, p in enumerate(_profile_items, 1):
         pid = p["id"]
         fallback_name = p["name"]
-        _progress(_pi, len(_profile_items), fallback_name)
 
-        # Two API calls per profile, not three. The scope subtree is already
-        # part of the full profile record, so it comes off profile_json rather
-        # than from a second identical fetch (see get_profile_scope_json).
-        #
-        # Unlike the policy and mac-app loops, the raw XML stays EAGER here:
-        # get_payload_xml_string() needs it unconditionally to pull the
-        # payload plist out of <payloads>, so there is nothing to defer.
-        profile_json = get_profile_json(pid, args.profile)
-        raw_xml = get_profile_raw_xml(pid, args.profile)
+        # Two API calls per profile, pre-fetched in parallel above.
+        # The scope subtree is already part of the full profile record, so it
+        # comes off profile_json rather than a second identical fetch.
+        # Unlike the policy and mac-app loops, raw XML is EAGER here:
+        # get_payload_xml_string() needs it unconditionally.
+        profile_json, raw_xml = _profile_cache.get(pid, ({}, ""))
         scope_json = profile_json.get("scope") if isinstance(profile_json, dict) else None
         if not isinstance(scope_json, dict):
             scope_json = {}
@@ -5253,6 +5336,18 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
 
     if policies:
         _section_start("Fetching policy details")
+        _policy_ids = []
+        for p in policies:
+            _pid = p.get("id")
+            if not isinstance(_pid, int):
+                try:
+                    _pid = int(_pid)
+                except Exception:
+                    continue
+            _policy_ids.append(_pid)
+        _policy_cache = _prefetch_parallel(_policy_ids, get_policy_json, args.profile)
+    else:
+        _policy_cache = {}
     for _pi, p in enumerate(policies, 1):
         pid = p.get("id")
         if not isinstance(pid, int):
@@ -5263,15 +5358,9 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
 
         fallback_name = str(p.get("name") or f"Policy {pid}")
         _progress(_pi, len(policies), fallback_name)
-        # One API call per policy, not three.
-        #
-        # `get_policy_json` already returns the whole policy record, scope
-        # subtree included, so the scope comes straight off pjson rather than
-        # from a second identical fetch. And the raw XML is only ever needed
-        # as a fallback when the JSON path yields nothing, so it goes behind a
-        # memoised lazy callable instead of being fetched up front. See
-        # _lazy_raw_xml and get_policy_scope_json for the history.
-        pjson = get_policy_json(pid, args.profile)
+        # JSON pre-fetched in parallel above. Raw XML stays lazy — it is only
+        # needed as a fallback when the JSON scope walk yields nothing (rare).
+        pjson = _policy_cache.get(pid, {})
         pxml = _lazy_raw_xml(get_policy_raw_xml, pid, args.profile)
         pscope = pjson.get("scope") if isinstance(pjson, dict) else None
         if not isinstance(pscope, dict):
@@ -5606,12 +5695,15 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
 
         if _printer_list:
             _section_start("Fetching printer details")
+            _printer_ids = [_pr.get("id") for _pr in _printer_list if isinstance(_pr.get("id"), int)]
+            _printer_cache = _prefetch_parallel(_printer_ids, get_classic_printer_json, args.profile)
+        else:
+            _printer_cache = {}
         for _i_pr, _pr in enumerate(_printer_list, 1):
             _prid = _pr.get("id")
             if not isinstance(_prid, int):
                 continue
-            _progress(_i_pr, len(_printer_list), str(_pr.get("name") or ""))
-            _detail = get_classic_printer_json(_prid, args.profile)
+            _detail = _printer_cache.get(_prid)
             if not isinstance(_detail, dict):
                 _detail = {}
             classic_printer_rows.append([
@@ -5640,6 +5732,18 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
 
     if mac_app_list:
         _section_start("Fetching managed app details")
+        _mac_app_ids = []
+        for entry in mac_app_list:
+            _aid = entry.get("id")
+            if not isinstance(_aid, int):
+                try:
+                    _aid = int(_aid)
+                except Exception:
+                    continue
+            _mac_app_ids.append(_aid)
+        _mac_app_cache = _prefetch_parallel(_mac_app_ids, get_mac_app_json, args.profile)
+    else:
+        _mac_app_cache = {}
     for _ai, entry in enumerate(mac_app_list, 1):
         app_id = entry.get("id")
         if not isinstance(app_id, int):
@@ -5647,13 +5751,10 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
                 app_id = int(app_id)
             except Exception:
                 continue
-        _progress(_ai, len(mac_app_list), str(entry.get("name") or ""))
 
-        # One API call per app, not two. The raw XML is only consumed by
-        # extract_mac_app_scope()'s fallback branch, which fires only when the
-        # JSON scope walk finds nothing, so it goes behind a memoised lazy
-        # callable (see _lazy_raw_xml).
-        app_json = get_mac_app_json(app_id, args.profile)
+        # JSON pre-fetched in parallel above. Raw XML stays lazy — it is only
+        # needed as a fallback when the JSON scope walk yields nothing (rare).
+        app_json = _mac_app_cache.get(app_id, {})
         raw_xml = _lazy_raw_xml(get_mac_app_raw_xml, app_id, args.profile)
         scope_json = app_json.get("scope", {}) if isinstance(app_json, dict) else {}
         general = app_json.get("general", {}) if isinstance(app_json, dict) else {}
@@ -5756,12 +5857,15 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
 
     if rs_list:
         _section_start("Fetching restricted software details")
+        _rs_ids = [int(rs.get("id")) for rs in rs_list if rs.get("id") is not None]
+        _rs_cache = _prefetch_parallel(_rs_ids, get_restricted_software_json, args.profile)
+    else:
+        _rs_cache = {}
     for _ri, rs in enumerate(rs_list, 1):
         rs_id = rs.get("id")
         if rs_id is None:
             continue
-        _progress(_ri, len(rs_list), str(rs.get("name") or ""))
-        full = get_restricted_software_json(int(rs_id), args.profile)
+        full = _rs_cache.get(int(rs_id), {})
         general = full.get("general", {}) if isinstance(full, dict) else {}
         scope = full.get("scope", {}) if isinstance(full, dict) else {}
 
@@ -5841,11 +5945,13 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
 
     if ps_list:
         _section_start("Fetching prestage details")
+        _ps_ids = [str(ps_entry.get("id")) for ps_entry in ps_list if ps_entry.get("id") is not None]
+        _ps_cache = _prefetch_parallel(_ps_ids, get_computer_prestage_json, args.profile)
+    else:
+        _ps_cache = {}
     for _psi, ps_entry in enumerate(ps_list, 1):
         ps_id = ps_entry.get("id")
-        ps_name = str(ps_entry.get("displayName") or ps_id or "")
-        _progress(_psi, len(ps_list), ps_name)
-        ps = get_computer_prestage_json(str(ps_id), args.profile)
+        ps = _ps_cache.get(str(ps_id)) if ps_id is not None else None
         if not ps:
             ps = ps_entry
 
