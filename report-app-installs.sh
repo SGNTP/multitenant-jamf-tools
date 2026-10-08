@@ -286,7 +286,9 @@ choose_apps() {
                 while true; do
                     read -r -p "   Number(s), e.g. 1,3, or Enter for all of them: " selection || selection=""
                     if [[ -z "$selection" ]]; then
-                        app_specs+=("contains"$'\t'"$p")
+                        for i in "${!pick_names[@]}"; do
+                            add_picked_app "$i"
+                        done
                         break
                     fi
                     if [[ "$selection" =~ ^[0-9,\ ]+$ ]]; then
