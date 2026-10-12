@@ -1,0 +1,22 @@
+{
+  "AppleTV11,1": {
+    "platform":      "tvOS",
+    "maxOsMajor":    27,
+    "maxOsName":     "tvOS 27",
+    "maxOsVersion":  "27",
+    "marketingName": "Apple TV 4K (2nd generation)",
+    "architecture":  null,
+    "source":        "override",
+    "confidence":    "confirmed"
+  },
+  "AppleTV6,2": {
+    "platform":      "tvOS",
+    "maxOsMajor":    26,
+    "maxOsName":     "tvOS 26",
+    "maxOsVersion":  "26",
+    "marketingName": "Apple TV 4K (1st generation)",
+    "architecture":  null,
+    "source":        "override",
+    "confidence":    "confirmed"
+  }
+}

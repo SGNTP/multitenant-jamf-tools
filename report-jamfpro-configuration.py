@@ -1447,8 +1447,7 @@ def scope_targets_all(scope: dict | None) -> bool:
 def fetch_instance_overview(profile_name: str | None) -> dict[str, str]:
     """Call pro overview and return a flat {resource: value} dict."""
     cmd = ["jamf-cli", "pro", "overview", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     result: dict[str, str] = {}
     if isinstance(data, list):
@@ -1463,8 +1462,7 @@ def fetch_instance_overview(profile_name: str | None) -> dict[str, str]:
 def fetch_jamf_pro_version(profile_name: str | None) -> str:
     """Return the clean Jamf Pro version string (strips build suffix)."""
     cmd = ["jamf-cli", "pro", "jamf-pro-versions", "list", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, dict):
         raw = str(data.get("version") or "")
@@ -1485,8 +1483,7 @@ def fetch_laps_settings(profile_name: str | None) -> dict[str, Any]:
     """
     cmd = ["jamf-cli", "pro", "local-admin-passwords", "settings",
            "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     return data if isinstance(data, dict) else {}
 
@@ -1494,8 +1491,7 @@ def fetch_laps_settings(profile_name: str | None) -> dict[str, Any]:
 def fetch_sso_settings(profile_name: str | None) -> dict[str, Any]:
     """Return current SSO configuration. Empty dict on failure."""
     cmd = ["jamf-cli", "pro", "sso-settings", "get", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     return data if isinstance(data, dict) else {}
 
@@ -1503,8 +1499,7 @@ def fetch_sso_settings(profile_name: str | None) -> dict[str, Any]:
 def fetch_cloud_ldap_servers(profile_name: str | None) -> list[dict[str, Any]]:
     """Return all configured Cloud Identity Provider (Cloud LDAP) configs."""
     cmd = ["jamf-cli", "pro", "cloud-ldaps", "get", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         return data
@@ -1525,8 +1520,7 @@ def fetch_active_alerts(profile_name: str | None) -> list[str]:
     Returns [] on any failure so the rest of the summary still renders.
     """
     cmd = ["jamf-cli", "pro", "notifications", "list", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, dict):
         items = data.get("results") or data.get("notifications") or []
@@ -1573,8 +1567,7 @@ def fetch_jamf_connect_deployments(profile_name: str | None) -> int:
     """
     cmd = ["jamf-cli", "pro", "jamf-connects", "list", "--all",
            "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         return len(data)
@@ -1588,8 +1581,7 @@ def fetch_jamf_connect_deployments(profile_name: str | None) -> int:
 def fetch_jamf_protect_status(profile_name: str | None) -> dict[str, Any]:
     """Return the Jamf Protect integration settings, or {} if absent."""
     cmd = ["jamf-cli", "pro", "jamf-protect", "get", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     return data if isinstance(data, dict) else {}
 
@@ -1597,8 +1589,7 @@ def fetch_jamf_protect_status(profile_name: str | None) -> dict[str, Any]:
 def fetch_jamf_protect_plans(profile_name: str | None) -> list[dict[str, Any]]:
     """Return the synced Jamf Protect Plans (with associated config-profile info)."""
     cmd = ["jamf-cli", "pro", "jamf-protect-plans", "list", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         return data
@@ -1682,8 +1673,7 @@ def build_jamf_protect_sheet(status: dict[str, Any],
 
 def list_profiles(profile_name: str | None) -> list[dict[str, Any]]:
     cmd = ["jamf-cli", "pro", "classic-macos-config-profiles", "list", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd(cmd))
     if isinstance(data, list):
         return data
@@ -1694,8 +1684,7 @@ def list_profiles(profile_name: str | None) -> list[dict[str, Any]]:
 
 def list_policies(profile_name: str | None) -> list[dict[str, Any]]:
     cmd = ["jamf-cli", "pro", "classic-policies", "list", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         return data
@@ -1706,8 +1695,7 @@ def list_policies(profile_name: str | None) -> list[dict[str, Any]]:
 
 def get_policy_json(policy_id: int, profile_name: str | None) -> dict[str, Any]:
     cmd = ["jamf-cli", "pro", "classic-policies", "get", str(policy_id), "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, dict):
         return data
@@ -1716,8 +1704,7 @@ def get_policy_json(policy_id: int, profile_name: str | None) -> dict[str, Any]:
 
 def get_policy_raw_xml(policy_id: int, profile_name: str | None) -> str:
     cmd = ["jamf-cli", "pro", "classic-policies", "get", str(policy_id), "--output", "raw"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     return run_cmd_maybe(cmd)
 
 
@@ -1745,8 +1732,7 @@ def get_policy_scope_json(policy_id: int, profile_name: str | None) -> dict[str,
     """
     cmd = ["jamf-cli", "pro", "classic-policies", "get",
            str(policy_id), "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, dict):
         scope = data.get("scope")
@@ -1771,8 +1757,7 @@ def list_classic_printers(profile_name: str | None) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
 
     cmd = ["jamf-cli", "pro", "classic-printers", "list", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
 
     items: list[Any] = []
@@ -1785,8 +1770,7 @@ def list_classic_printers(profile_name: str | None) -> list[dict[str, Any]]:
     if not items:
         raw_cmd = ["jamf-cli", "pro", "raw", "GET",
                    "/JSSResource/printers", "--output", "json"]
-        if profile_name:
-            raw_cmd.extend(_auth_args(profile_name))
+        raw_cmd.extend(_auth_args(profile_name))
         raw_data = parse_json(run_cmd_maybe(raw_cmd))
         if isinstance(raw_data, dict):
             items = raw_data.get("printers") or []
@@ -1817,8 +1801,7 @@ def get_classic_printer_json(printer_id: int, profile_name: str | None) -> dict[
     """
     cmd = ["jamf-cli", "pro", "classic-printers", "get",
            str(printer_id), "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, dict) and data:
         # API may return the body directly or wrapped under "printer".
@@ -1828,8 +1811,7 @@ def get_classic_printer_json(printer_id: int, profile_name: str | None) -> dict[
     raw_cmd = ["jamf-cli", "pro", "raw", "GET",
                f"/JSSResource/printers/id/{printer_id}",
                "--output", "json"]
-    if profile_name:
-        raw_cmd.extend(_auth_args(profile_name))
+    raw_cmd.extend(_auth_args(profile_name))
     raw_data = parse_json(run_cmd_maybe(raw_cmd))
     if isinstance(raw_data, dict):
         inner = raw_data.get("printer")
@@ -1847,8 +1829,7 @@ def list_scripts(profile_name: str | None) -> list[dict[str, Any]]:
     so the rest of the export still runs.
     """
     cmd = ["jamf-cli", "pro", "scripts", "list", "--all", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         items = data
@@ -1888,8 +1869,7 @@ def list_computer_eas(profile_name: str | None) -> list[dict[str, Any]]:
     """
     cmd = ["jamf-cli", "pro", "computer-extension-attributes",
            "list", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         items = data
@@ -1931,8 +1911,7 @@ def list_packages(profile_name: str | None) -> list[dict[str, Any]]:
     with at least `id` and `name`. Returns [] on failure.
     """
     cmd = ["jamf-cli", "pro", "packages", "list", "--all", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         items = data
@@ -1973,8 +1952,7 @@ def list_computer_groups(profile_name: str | None) -> list[dict[str, Any]]:
     degrade gracefully if the call fails.
     """
     cmd = ["jamf-cli", "pro", "computer-groups", "list", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         items = data
@@ -2011,8 +1989,7 @@ def list_computer_groups(profile_name: str | None) -> list[dict[str, Any]]:
 def get_script_body(script_name: str, profile_name: str | None) -> str:
     """Fetch the script contents for a named script via pro scripts get."""
     cmd = ["jamf-cli", "pro", "scripts", "get", "--name", script_name, "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, dict):
         # Modern API returns scriptContents or script_contents
@@ -2242,6 +2219,629 @@ class _OllamaCache:
 
 
 _ollama_cache = _OllamaCache(_OLLAMA_CACHE_PATH)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Device Capability Index
+#
+# Resolves maximum supported OS for a hardware model identifier such as
+# MacBookPro16,1 or iPhone12,1. Data comes from:
+#   1. SOFA macOS feed  - top-level Models dict; covers all Intel and Apple
+#      silicon Macs back to Monterey.
+#   2. SOFA iOS feed    - SecurityReleases.SupportedDevices; covers iOS 18+.
+#   3. ipsw.me          - per-device fallback for pre-iOS-18 iPhones/iPads not
+#      in the SOFA feed. One HTTP call per new identifier; cached permanently.
+#   4. device_capability_overrides.json beside this script - always wins.
+#      Required for tvOS (no automated source) and manual corrections.
+#
+# Cache: JSON at ~/.cache/report-jamfpro-configuration/device_capability.json
+#   7-day TTL; ETag conditional requests keep refreshes cheap.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CAPABILITY_CACHE_PATH = (
+    pathlib.Path.home() / ".cache"
+    / "report-jamfpro-configuration" / "device_capability.json"
+)
+_CAPABILITY_TTL_DAYS  = 7
+_CAPABILITY_WARN_DAYS = 30
+_SOFA_MACOS_URL  = "https://sofafeed.macadmins.io/v1/macos_data_feed.json"
+_SOFA_IOS_URL    = "https://sofafeed.macadmins.io/v1/ios_data_feed.json"
+_IPSW_DEVICE_URL = "https://api.ipsw.me/v4/device/{}"
+_COMPAT_IOS_URL  = (
+    "https://gist.githubusercontent.com/talkingmoose/8626115822ca9f81463dd4e9e902ff9a/"
+    "raw/8af3b801af70c5a37afdb688798fff56b794c46b/"
+    "iOS%252026,%2520iPadOS%252026,%2520and%2520watchOS%252026%2520compatible%2520devices%2520(regex)"
+)
+_COMPAT_MACOS_URL = (
+    "https://gist.githubusercontent.com/talkingmoose/1404492cb0326395f1040af15870eeb9/"
+    "raw/e45d549f2d6d0b2a9dbfd7b4718ae780eebc1b26/"
+    "Golden%2520Gate-compatible%2520Macs%2520(regex)"
+)
+_COMPAT_TTL_DAYS = 90
+
+
+class DeviceCapabilityIndex:
+    """Build an identifier-to-max-OS index from SOFA feeds with a local JSON cache."""
+
+    _IPSW_DEVICES_URL = "https://api.ipsw.me/v4/devices"
+
+    def __init__(self, force_refresh: bool = False):
+        self._force    = force_refresh
+        self._cache: dict = {}
+        self._overrides: dict = {}
+        self._macos: dict = {}  # identifier -> capability dict
+        self._ios:   dict = {}  # identifier -> capability dict
+        self._security: dict = {}  # "macos"/"ios" -> {major -> release chain}
+        self._name_to_id: dict = {}  # normalised marketing name -> identifier
+        self._compat_latest: dict = {}  # identifier -> {"supported": bool, "name": str}
+        self._loaded = False
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def get(self, identifier: str, current_os_version: str = "",
+            model_name: str = "") -> dict:
+        """Return a capability dict for identifier. Never raises.
+
+        When identifier is empty but model_name is provided, attempts to
+        resolve the identifier from the marketing name (ipsw.me device list).
+        """
+        self._ensure_loaded()
+        if not identifier and model_name:
+            identifier = self._resolve_name(model_name)
+        result = self._resolve(identifier)
+        result["identifier"]  = identifier
+        result["fetchedAt"]   = self._cache.get("fetched_at", 0.0)
+        age_days = (time.time() - result["fetchedAt"]) / 86400
+        result["stale"] = age_days > _CAPABILITY_TTL_DAYS
+        # Enrich with talkingmoose compat lists (authoritative for latest OS)
+        compat = self._compat_latest.get(identifier)
+        if compat:
+            result["supportsLatestOs"] = compat["supported"]
+            if not result.get("marketingName") and compat.get("name"):
+                result["marketingName"] = compat["name"]
+            if compat["supported"]:
+                compat_src = compat.get("source", "")
+                if compat_src == "macos27":
+                    if result.get("maxOsMajor") is None or result["maxOsMajor"] < 27:
+                        result["maxOsMajor"] = 27
+                        result["maxOsName"]  = "macOS 27"
+                        result["confidence"] = "confirmed"
+                elif compat_src == "ios26":
+                    if result.get("maxOsMajor") is None or result["maxOsMajor"] < 26:
+                        result["maxOsMajor"] = 26
+                        result["confidence"] = "confirmed"
+        if current_os_version:
+            result["currentOsVersion"] = current_os_version
+            cur_m = re.match(r"^(\d+)", current_os_version)
+            if cur_m and result.get("maxOsMajor") is not None:
+                result["atMaxOs"] = int(cur_m.group(1)) >= result["maxOsMajor"]
+        return result
+
+    def security_recommendation(self, platform: str, os_version: str) -> dict:
+        """Return security posture for a device on platform at os_version.
+
+        Returns dict with keys: text, url, cve_total, actively_exploited,
+        latest_version, days_since_latest, up_to_date.
+        """
+        self._ensure_loaded()
+        empty = {"text": "", "url": "", "cve_total": 0, "actively_exploited": 0,
+                 "latest_version": "", "days_since_latest": 0, "up_to_date": True}
+        m = re.match(r"^(\d+)", os_version or "")
+        if not m:
+            return empty
+        major = int(m.group(1))
+        plat_key = "macos" if platform.lower() == "macos" else "ios"
+        plat_sec = self._security.get(plat_key, {})
+        chain = plat_sec.get(major) or plat_sec.get(str(major))
+        if not chain or not chain.get("releases"):
+            if plat_sec and major > 0:
+                tracked = [int(k) for k in plat_sec if str(k).isdigit()]
+                if tracked and major < min(tracked):
+                    newest_major = max(tracked)
+                    newest_chain = plat_sec.get(newest_major) or plat_sec.get(str(newest_major))
+                    newest_ver = ""
+                    newest_url = ""
+                    eol_cve_total = 0
+                    eol_active = 0
+                    if newest_chain and newest_chain.get("releases"):
+                        newest_ver = newest_chain["releases"][0].get("version", "")
+                        newest_url = newest_chain["releases"][0].get("securityInfo", "")
+                        for rel in newest_chain["releases"]:
+                            eol_cve_total += rel.get("cves", 0)
+                            eol_active += len(rel.get("activelyExploited", []))
+                    plat_name = "macOS" if plat_key == "macos" else "iPadOS" if "ipad" in platform.lower() else "iOS"
+                    target = f"{plat_name} {newest_ver}" if newest_ver else f"{plat_name} {newest_major}"
+                    text = f"No security updates — upgrade to {target}"
+                    if eol_cve_total:
+                        text += f" ({eol_cve_total} CVEs fixed)"
+                    return {
+                        "text": text,
+                        "url": newest_url, "cve_total": eol_cve_total,
+                        "actively_exploited": eol_active,
+                        "latest_version": newest_ver, "days_since_latest": 0,
+                        "up_to_date": False,
+                    }
+            return empty
+
+        # Minimum supported major per platform (from the support matrix).
+        # If a device is below this, don't recommend patching the old branch —
+        # redirect to the newest OS the device should be running.
+        _min_supported = {"macos": 15, "ios": 18}
+        if "ipad" in platform.lower():
+            _min_supported["ios"] = 26
+        _min_major = _min_supported.get(plat_key, 0)
+        if major < _min_major:
+            newest_major = max(int(k) for k in plat_sec if str(k).isdigit())
+            newest_chain = plat_sec.get(newest_major) or plat_sec.get(str(newest_major))
+            if newest_chain and newest_chain.get("releases"):
+                newest_ver = newest_chain["releases"][0].get("version", "")
+                newest_url = newest_chain["releases"][0].get("securityInfo", "")
+                total_cves = sum(r.get("cves", 0) for r in newest_chain["releases"])
+                total_active = sum(len(r.get("activelyExploited", [])) for r in newest_chain["releases"])
+                plat_name = "macOS" if plat_key == "macos" else "iPadOS" if "ipad" in platform.lower() else "iOS"
+                target = f"{plat_name} {newest_ver}" if newest_ver else f"{plat_name} {newest_major}"
+                text = f"Upgrade to {target}"
+                if total_cves:
+                    text += f" ({total_cves} CVEs fixed)"
+                return {
+                    "text": text, "url": newest_url,
+                    "cve_total": total_cves, "actively_exploited": total_active,
+                    "latest_version": newest_ver, "days_since_latest": 0,
+                    "up_to_date": False,
+                }
+
+        latest = chain["releases"][0]
+        latest_ver = latest["version"]
+        if self._ver_tuple(os_version) >= self._ver_tuple(latest_ver):
+            return empty
+        cve_total = 0
+        actively_exploited: list[str] = []
+        sec_url = latest["securityInfo"]
+        cur_tuple = self._ver_tuple(os_version)
+        for rel in chain["releases"]:
+            if self._ver_tuple(rel["version"]) <= cur_tuple:
+                break
+            cve_total += rel.get("cves", 0)
+            actively_exploited.extend(rel.get("activelyExploited", []))
+            if rel["securityInfo"]:
+                sec_url = rel["securityInfo"]
+        days_since = 0
+        if latest.get("date"):
+            try:
+                from datetime import datetime, timezone
+                rd = datetime.fromisoformat(latest["date"].replace("Z", "+00:00"))
+                days_since = (datetime.now(timezone.utc) - rd).days
+            except Exception:
+                pass
+        parts = [f"Update to {latest_ver}"]
+        if cve_total:
+            parts.append(f"{cve_total} CVEs patched")
+        if actively_exploited:
+            parts.append(f"{len(actively_exploited)} actively exploited")
+        if days_since:
+            parts.append(f"released {days_since}d ago")
+        text = " — ".join(parts[:2])
+        if len(parts) > 2:
+            text += " (" + ", ".join(parts[2:]) + ")"
+        return {
+            "text": text, "url": sec_url, "cve_total": cve_total,
+            "actively_exploited": len(actively_exploited),
+            "latest_version": latest_ver, "days_since_latest": days_since,
+            "up_to_date": False,
+        }
+
+    @staticmethod
+    def _ver_tuple(v: str) -> tuple:
+        return tuple(int(p) if p.isdigit() else 0 for p in v.split("."))
+
+    @staticmethod
+    def _normalise_name(name: str) -> str:
+        """Normalise a marketing model name for fuzzy matching.
+
+        Strips parenthesised connectivity suffixes, generation ordinals,
+        and normalises whitespace so both Jamf Pro and ipsw.me names match.
+        e.g. "iPad 9th generation (Wi-Fi)" and "iPad (WiFi, 9th generation)"
+        both become "ipad 9 gen wifi".
+        """
+        import re as _re
+        s = name.lower().strip()
+        s = s.replace("wi-fi", "wifi").replace("wi‑fi", "wifi")
+        s = _re.sub(r"\b(\d+)(?:st|nd|rd|th)\b", r"\1", s)
+        s = s.replace("generation", "gen")
+        s = _re.sub(r"[(),\-–—+/]", " ", s)
+        s = _re.sub(r"\s+", " ", s).strip()
+        return s
+
+    def _resolve_name(self, model_name: str) -> str:
+        """Resolve a marketing model name to a hardware identifier."""
+        if not model_name:
+            return ""
+        norm = self._normalise_name(model_name)
+        if norm in self._name_to_id:
+            return self._name_to_id[norm]
+        query_words = set(norm.split())
+        if not query_words:
+            return ""
+        best_id, best_score, best_len = "", 0.0, 999
+        for stored_norm, ident in self._name_to_id.items():
+            stored_words = set(stored_norm.split())
+            if not stored_words:
+                continue
+            overlap = len(query_words & stored_words)
+            union = len(query_words | stored_words)
+            jaccard = overlap / union if union else 0
+            recall = overlap / len(query_words)
+            precision = overlap / len(stored_words)
+            score = min(recall, precision) * 0.5 + jaccard * 0.5
+            if score > best_score or (score == best_score and len(stored_words) < best_len):
+                best_score = score
+                best_id = ident
+                best_len = len(stored_words)
+        return best_id if best_score >= 0.55 else ""
+
+    # ── Loading ───────────────────────────────────────────────────────────────
+
+    def _ensure_loaded(self):
+        if self._loaded:
+            return
+        self._loaded = True
+        self._load_overrides()
+        self._load_cache()
+        age_days = (time.time() - self._cache.get("fetched_at", 0.0)) / 86400
+        if age_days > _CAPABILITY_WARN_DAYS:
+            warn(f"Device capability cache is {int(age_days)} days old. "
+                 "Run with --refresh-capabilities to update.")
+        _missing_keys = (
+            "security_releases" not in self._cache
+            or "name_to_id" not in self._cache
+        )
+        _need_refresh = self._force or age_days > _CAPABILITY_TTL_DAYS or _missing_keys
+        if _missing_keys:
+            self._cache.pop("macos_etag", None)
+            self._cache.pop("ios_etag", None)
+        if _need_refresh:
+            self._fetch_sofa()
+            self._save_cache()
+        else:
+            self._macos      = self._cache.get("macos_index", {})
+            self._ios        = self._cache.get("ios_index",   {})
+            self._security   = self._cache.get("security_releases", {})
+            self._name_to_id = self._cache.get("name_to_id", {})
+        self._fetch_compat_lists()
+
+    def _load_overrides(self):
+        candidate = pathlib.Path(__file__).parent / "device_capability_overrides.json"
+        if candidate.exists():
+            try:
+                with open(candidate) as fh:
+                    self._overrides = json.load(fh)
+            except Exception:
+                pass
+
+    def _load_cache(self):
+        if _CAPABILITY_CACHE_PATH.exists():
+            try:
+                with open(_CAPABILITY_CACHE_PATH) as fh:
+                    self._cache = json.load(fh)
+            except Exception:
+                self._cache = {}
+
+    def _save_cache(self):
+        _CAPABILITY_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self._cache["macos_index"]       = self._macos
+        self._cache["ios_index"]         = self._ios
+        self._cache["security_releases"] = self._security
+        try:
+            with open(_CAPABILITY_CACHE_PATH, "w") as fh:
+                json.dump(self._cache, fh)
+        except Exception:
+            pass
+
+    # ── SOFA fetch ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _ssl_ctx():
+        import ssl
+        try:
+            import certifi
+            return ssl.create_default_context(cafile=certifi.where())
+        except ImportError:
+            return ssl.create_default_context()
+
+    def _fetch_conditional(self, url: str, etag_key: str) -> "bytes | None":
+        """GET url with ETag. Returns body bytes or None on 304 Not Modified."""
+        import urllib.request
+        import urllib.error
+        etag = self._cache.get(etag_key, "")
+        hdrs = {"User-Agent": "report-jamfpro-configuration/1.0"}
+        if etag:
+            hdrs["If-None-Match"] = etag
+        req = urllib.request.Request(url, headers=hdrs)
+        ctx = self._ssl_ctx()
+        try:
+            with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+                self._cache[etag_key] = resp.headers.get("ETag", "")
+                return resp.read()
+        except urllib.error.HTTPError as exc:
+            if exc.code == 304:
+                return None
+            raise
+
+    def _fetch_sofa(self):
+        """Fetch both SOFA feeds; rebuild macos, ios, and security indexes."""
+        # macOS: top-level Models dict is the authoritative source.
+        # Keys are model identifiers; values include OSVersions (list of ints,
+        # newest first), SupportedOS (list of name strings), and MarketingName.
+        macos_osvs = []
+        try:
+            body = self._fetch_conditional(_SOFA_MACOS_URL, "macos_etag")
+            if body is not None:
+                feed = json.loads(body)
+                raw = feed.get("Models", {})
+                macos_osvs = feed.get("OSVersions", [])
+                self._cache["macos_models_raw"] = raw
+                self._cache["macos_osvs_raw"]   = macos_osvs
+            else:
+                raw = self._cache.get("macos_models_raw", {})
+                macos_osvs = self._cache.get("macos_osvs_raw", [])
+        except Exception as exc:
+            warn(f"SOFA macOS fetch failed ({exc}); using cached data")
+            raw = self._cache.get("macos_models_raw", {})
+            macos_osvs = self._cache.get("macos_osvs_raw", [])
+
+        self._macos = {}
+        for ident, info in raw.items():
+            os_majors = info.get("OSVersions", [])
+            os_names  = info.get("SupportedOS", [])
+            if not os_majors:
+                continue
+            max_major = os_majors[0]
+            max_name  = os_names[0] if os_names else str(max_major)
+            # macOS 27 (Golden Gate) dropped all Intel Macs. A device that
+            # appears in the macOS 27 supported list is Apple silicon.
+            self._macos[ident] = {
+                "platform":      "macOS",
+                "maxOsMajor":    max_major,
+                "maxOsName":     max_name,
+                "maxOsVersion":  max_name,
+                "marketingName": info.get("MarketingName", ""),
+                "architecture":  "apple silicon" if 27 in os_majors else "intel",
+                "source":        "sofa-macos",
+                "confidence":    "confirmed",
+            }
+
+        # iOS/iPadOS: build index from SecurityReleases.SupportedDevices.
+        # OSVersions are ordered newest first; the first match per identifier
+        # is its highest supported OS. This feed covers iOS 18 onward only;
+        # older devices fall through to the ipsw.me fallback.
+        try:
+            body = self._fetch_conditional(_SOFA_IOS_URL, "ios_etag")
+            if body is not None:
+                ios_osvs = json.loads(body).get("OSVersions", [])
+                self._cache["ios_osvs_raw"] = ios_osvs
+            else:
+                ios_osvs = self._cache.get("ios_osvs_raw", [])
+        except Exception as exc:
+            warn(f"SOFA iOS fetch failed ({exc}); using cached data")
+            ios_osvs = self._cache.get("ios_osvs_raw", [])
+
+        self._ios = {}
+        for osv in ios_osvs:
+            label   = str(osv.get("OSVersion", ""))
+            major_m = re.match(r"^(\d+)", label)
+            if not major_m:
+                continue
+            major    = int(major_m.group(1))
+            releases = osv.get("SecurityReleases", [])
+            if not releases:
+                continue
+            devs    = releases[0].get("SupportedDevices", [])
+            point_v = releases[0].get("ProductVersion", label)
+            for dev in devs:
+                if dev not in self._ios:
+                    platform = "iPadOS" if dev.startswith("iPad") else "iOS"
+                    self._ios[dev] = {
+                        "platform":      platform,
+                        "maxOsMajor":    major,
+                        "maxOsName":     label,
+                        "maxOsVersion":  point_v,
+                        "marketingName": "",
+                        "architecture":  None,
+                        "source":        "sofa-ios",
+                        "confidence":    "confirmed",
+                    }
+
+        self._security = {"macos": {}, "ios": {}}
+        for plat_key, osvs in (("macos", macos_osvs), ("ios", ios_osvs)):
+            for osv in osvs:
+                label = str(osv.get("OSVersion", ""))
+                mm = re.search(r"(\d+)", label)
+                if not mm:
+                    continue
+                major = int(mm.group(1))
+                chain: list[dict] = []
+                for sr in osv.get("SecurityReleases", []):
+                    chain.append({
+                        "version":           sr.get("ProductVersion", ""),
+                        "date":              sr.get("ReleaseDate", ""),
+                        "cves":              sr.get("UniqueCVEsCount", 0),
+                        "activelyExploited": sr.get("ActivelyExploitedCVEs", []),
+                        "securityInfo":      sr.get("SecurityInfo", ""),
+                    })
+                if chain:
+                    self._security[plat_key][major] = {"releases": chain}
+
+        # Build name→identifier reverse mapping from multiple sources.
+        self._name_to_id = {}
+        # Source 1: SOFA macOS Models (has MarketingName)
+        for ident, info in raw.items():
+            mname = info.get("MarketingName", "")
+            if mname:
+                self._name_to_id[self._normalise_name(mname)] = ident
+        # Source 2: ipsw.me bulk device list (covers all Apple hardware)
+        try:
+            import urllib.request
+            ipsw_cached = self._cache.get("ipsw_device_list")
+            if not ipsw_cached:
+                req = urllib.request.Request(
+                    self._IPSW_DEVICES_URL,
+                    headers={"User-Agent": "report-jamfpro-configuration/1.0"},
+                )
+                ctx = self._ssl_ctx()
+                with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+                    ipsw_cached = json.loads(resp.read())
+                self._cache["ipsw_device_list"] = ipsw_cached
+            for entry in (ipsw_cached or []):
+                ident = entry.get("identifier", "")
+                dname = entry.get("name", "")
+                if ident and dname:
+                    norm = self._normalise_name(dname)
+                    if norm not in self._name_to_id:
+                        self._name_to_id[norm] = ident
+        except Exception as exc:
+            warn(f"ipsw.me device list fetch failed ({exc}); name fallback limited to SOFA macOS")
+
+        self._cache["name_to_id"] = self._name_to_id
+        self._cache["fetched_at"] = time.time()
+
+    def _fetch_compat_lists(self):
+        """Fetch talkingmoose compatibility gists for latest OS versions.
+
+        Parses supported identifiers (lines matching 'ID [name]') from both
+        macOS Golden Gate and iOS/iPadOS 26 gists. Cached separately with a
+        90-day TTL since these only change at WWDC / OS launches.
+        """
+        import urllib.request
+        compat_age = (time.time() - self._cache.get("compat_fetched_at", 0.0)) / 86400
+        if not self._force and compat_age <= _COMPAT_TTL_DAYS and "compat_latest" in self._cache:
+            self._compat_latest = self._cache["compat_latest"]
+            return
+
+        result: dict[str, dict] = {}
+        ctx = self._ssl_ctx()
+
+        for url, os_label in (
+            (_COMPAT_IOS_URL, "ios26"),
+            (_COMPAT_MACOS_URL, "macos27"),
+        ):
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "report-jamfpro-configuration/1.0"})
+                with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
+                    text = resp.read().decode("utf-8", errors="replace")
+                in_supported = False
+                for line in text.splitlines():
+                    stripped = line.strip()
+                    if stripped == "Supported:":
+                        in_supported = True
+                        continue
+                    elif stripped == "Unsupported:":
+                        in_supported = False
+                        continue
+                    m = re.match(r"^(\w+\d+,\d+)\s*(?:\[(.+?)\]|\((.+?)\))?", line)
+                    if m:
+                        ident = m.group(1)
+                        mname = m.group(2) or m.group(3) or ""
+                        if ident not in result:
+                            result[ident] = {"supported": in_supported, "name": mname, "source": os_label}
+            except Exception as exc:
+                warn(f"Compat list fetch failed for {os_label} ({exc})")
+
+        self._compat_latest = result
+        self._cache["compat_latest"] = result
+        self._cache["compat_fetched_at"] = time.time()
+        self._save_cache()
+
+    # ── Resolution ────────────────────────────────────────────────────────────
+
+    def _resolve(self, identifier: str) -> dict:
+        if identifier in self._overrides:
+            result = dict(self._overrides[identifier])
+            result.setdefault("source", "override")
+            result.setdefault("confidence", "confirmed")
+            return result
+        if identifier in self._macos:
+            return dict(self._macos[identifier])
+        if identifier in self._ios:
+            return dict(self._ios[identifier])
+        # Fallback for iPhones/iPads capped below iOS 18 (not in SOFA feed).
+        if identifier.startswith(("iPhone", "iPad")):
+            fb = self._ipsw_fallback(identifier)
+            if fb:
+                return fb
+        # tvOS and unrecognised: no automated source.
+        return {
+            "platform":      self._infer_platform(identifier),
+            "maxOsMajor":    None,
+            "maxOsName":     None,
+            "maxOsVersion":  None,
+            "marketingName": "",
+            "architecture":  None,
+            "source":        "none",
+            "confidence":    "unknown",
+        }
+
+    def _ipsw_fallback(self, identifier: str) -> "dict | None":
+        """Query ipsw.me for a device absent from the SOFA feed. Caches per identifier."""
+        import urllib.request
+        per_dev = self._cache.setdefault("ipsw_per_device", {})
+        if identifier in per_dev:
+            return per_dev[identifier] or None
+        url = _IPSW_DEVICE_URL.format(identifier)
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "report-jamfpro-configuration/1.0"}
+            )
+            ctx = self._ssl_ctx()
+            with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+                data = json.loads(resp.read())
+        except Exception:
+            per_dev[identifier] = None
+            return None
+        firmwares = data.get("firmwares", [])
+        if not firmwares:
+            per_dev[identifier] = None
+            return None
+
+        def _vsort(v: str) -> tuple:
+            return tuple(int(p) if p.isdigit() else 0 for p in v.split("."))
+
+        versions = [f.get("version", "") for f in firmwares if f.get("version")]
+        if not versions:
+            per_dev[identifier] = None
+            return None
+        max_v  = max(versions, key=_vsort)
+        maj_m  = re.match(r"^(\d+)", max_v)
+        major  = int(maj_m.group(1)) if maj_m else 0
+        result = {
+            "platform":      "iPadOS" if identifier.startswith("iPad") else "iOS",
+            "maxOsMajor":    major,
+            "maxOsName":     max_v,
+            "maxOsVersion":  max_v,
+            "marketingName": data.get("name", ""),
+            "architecture":  None,
+            "source":        "ipsw.me",
+            "confidence":    "confirmed",
+        }
+        per_dev[identifier] = result
+        self._save_cache()
+        return result
+
+    @staticmethod
+    def _infer_platform(identifier: str) -> str:
+        if identifier.startswith("iPhone"):
+            return "iOS"
+        if identifier.startswith("iPad"):
+            return "iPadOS"
+        if identifier.startswith("AppleTV"):
+            return "tvOS"
+        for prefix in ("MacBook", "iMac", "Macmini", "MacPro", "Mac"):
+            if identifier.startswith(prefix):
+                return "macOS"
+        return "unknown"
+
+
+# Module-level singleton; initialised inside _export_one on first run.
+_capability_index: "DeviceCapabilityIndex | None" = None
 
 
 def _setup_ollama() -> bool:
@@ -2598,26 +3198,86 @@ def _ollama_summarise_profile(profile_name: str, settings_text: str) -> str:
 
 def _ollama_health_actions(comp_name: str, model: str,
                            os_version: str, issues: str,
-                           existing_actions: str) -> str:
-    """Enhance existing health-check remediation actions for a specific Mac.
+                           existing_actions: str,
+                           capability: "dict | None" = None,
+                           security: "dict | None" = None) -> str:
+    """Enhance existing health-check remediation actions for a specific Apple device.
 
     Takes the pre-written suggested actions and improves them for clarity and
-    practicality from a Jamf Pro MDM administrator's perspective. Only rewrites
-    wording where it adds value — does not invent new steps or remove existing ones.
+    practicality from a Jamf Pro MDM administrator's perspective. When a
+    capability dict is supplied (from DeviceCapabilityIndex.get()), a DEVICE
+    FACTS block is prepended so the model knows what OS the hardware can
+    actually run and does not recommend upgrades beyond the device's maximum.
+    When a security dict is supplied (from security_recommendation()), a
+    SECURITY POSTURE block gives the model CVE and patch-age context.
 
-    Cached: keyed on the full input tuple. Note that `comp_name` shifts the
-    cache key per-Mac, so re-runs benefit only when a Mac's issues list is
-    stable. Still worth caching because health-check re-runs in CI / sched
-    jobs often see identical inputs.
+    Cached: keyed on the full input tuple including capability and security facts.
     """
-    payload = f"{comp_name}\x00{model}\x00{os_version}\x00{issues}\x00{existing_actions}"
-    cached = _ollama_cache.get("health", OLLAMA_MODEL, payload)
+    # Build the authoritative device facts block when capability is available.
+    facts_block = ""
+    if capability and capability.get("confidence") != "unknown":
+        max_os   = capability.get("maxOsName") or capability.get("maxOsMajor") or "unknown"
+        at_max   = capability.get("atMaxOs")
+        arch     = capability.get("architecture") or ""
+        conf     = capability.get("confidence", "unknown")
+        cur_os   = capability.get("currentOsVersion") or os_version
+        facts_block = (
+            "DEVICE FACTS (authoritative, do not contradict):\n"
+            f"- Model: {comp_name} ({model})\n"
+            f"- Platform: {capability.get('platform', 'macOS')}\n"
+        )
+        if arch:
+            facts_block += f"- Architecture: {arch}\n"
+        facts_block += (
+            f"- Current OS: {cur_os}\n"
+            f"- Max supported OS: {max_os}\n"
+            f"- At max OS: {'yes' if at_max else 'no'}\n"
+            f"- Confidence: {conf}\n\n"
+        )
+
+    security_block = ""
+    if security and not security.get("up_to_date", True):
+        security_block = (
+            "SECURITY POSTURE (authoritative, from SOFA feed):\n"
+            f"- Current version: {os_version}\n"
+            f"- Latest available: {security.get('latest_version', '?')}\n"
+            f"- CVEs patched since current: {security.get('cve_total', 0)}\n"
+            f"- Actively exploited CVEs: {security.get('actively_exploited', 0)}\n"
+            f"- Days since latest release: {security.get('days_since_latest', '?')}\n\n"
+        )
+
+    system_rules = (
+        "Use only the facts provided for OS support. "
+        "Never infer max OS from the model name or from training knowledge. "
+        "Say a device cannot be upgraded further only when 'At max OS' is yes "
+        "and confidence is confirmed. "
+        "If confidence is unknown or inferred, say max OS is unverified and do not state a limit. "
+        "For an Intel Mac at its max OS, recommend hardware replacement planning "
+        "and staying on the last supported release. "
+        "Do not recommend unsupported patchers or workarounds. "
+        "Do not mention Apple Intelligence or other feature eligibility. "
+    ) if facts_block else ""
+    if security_block:
+        system_rules += (
+            "When security patches are outstanding, emphasise the urgency: "
+            "state the specific CVE count and actively-exploited count. "
+            "Recommend the exact target version from the security posture. "
+            "If actively exploited CVEs > 0, flag as urgent. "
+        )
+    if system_rules:
+        system_rules += "Concise, factual, no speculation, no padding.\n\n"
+
+    sec_key = f"\x00sec:{security.get('latest_version')}\x00{security.get('cve_total')}" if security else ""
+    cap_key  = f"\x00{capability.get('maxOsMajor')}\x00{capability.get('confidence')}" if capability else ""
+    payload  = f"{comp_name}\x00{model}\x00{os_version}\x00{issues}\x00{existing_actions}{cap_key}{sec_key}"
+    cached   = _ollama_cache.get("health", OLLAMA_MODEL, payload)
     if cached is not None:
         return cached
     _ollama_cache.note_miss()
     result = _ollama_query(
+        f"{facts_block}{security_block}{system_rules}"
         f"You are an experienced Jamf Pro MDM administrator. "
-        f"A Mac named '{comp_name}' (model: {model}, macOS: {os_version}) "
+        f"A device named '{comp_name}' (model: {model}, OS: {os_version}) "
         f"has these issues: {issues}.\n\n"
         f"Existing suggested actions: {existing_actions}\n\n"
         f"Enhance these actions for clarity and practicality where needed. "
@@ -2626,7 +3286,7 @@ def _ollama_health_actions(comp_name: str, model: str,
         f"sudo /usr/bin/profiles renew -type enrollment, mdmclient). "
         f"Do NOT suggest UI steps, System Preferences, Finder, or 'Enrol in Profile'. "
         f"If the existing actions are already clear and practical, return them unchanged. "
-        f"Keep the same number of action items. Reply with only the actions — no preamble, no bullet points."
+        f"Keep the same number of action items. Reply with only the actions, no preamble, no bullet points."
     )
     _ollama_cache.set("health", OLLAMA_MODEL, payload, result)
     return result
@@ -2721,16 +3381,16 @@ HEALTH_CHECK_DEFINITIONS: list[tuple[str, str, str]] = [
     ),
     (
         "Unsupported macOS",
-        "Running macOS 13 (Ventura) or older.",
+        "Running macOS 14 (Sonoma) or older.",
         "Apple no longer issues security updates for these versions. "
         "Newer management profiles may be incompatible. The device is "
         "increasingly at risk of unpatched vulnerabilities.",
     ),
     (
         "Minimum support macOS",
-        "Running macOS 14 (Sonoma).",
-        "Apple ends Sonoma support in October 2026. Plan upgrades to "
-        "macOS 15 or 26 in advance to avoid an unsupported fleet.",
+        "Running macOS 15 (Sequoia).",
+        "macOS 15 is still supported but no longer recommended. Plan upgrades to "
+        "macOS 26 or 27 to stay within the recommended fleet.",
     ),
     (
         "Disk space (5 tiers)",
@@ -2874,14 +3534,13 @@ IOS_HEALTH_CHECK_DEFINITIONS: list[tuple[str, str, str]] = [
     ),
     (
         "Minimum support iOS",
-        "Running iOS/iPadOS 17.x, the oldest major version still supported.",
-        "Apple's security fixes for this version are winding down. Plan an "
-        "upgrade to iOS 18 or 26 before iOS 27 ships to avoid an "
-        "unsupported device.",
+        "Running iOS/iPadOS 18.x, the oldest major version still supported.",
+        "iOS 18 is still supported but no longer recommended. Plan an "
+        "upgrade to iOS 26 or 27 to stay within the recommended fleet.",
     ),
     (
         "Unsupported iOS",
-        "Running iOS/iPadOS 16.x or earlier.",
+        "Running iOS/iPadOS 17.x or earlier.",
         "Apple no longer ships security updates for these versions. The "
         "device is increasingly exposed to unpatched vulnerabilities and "
         "misses newer management features.",
@@ -3157,8 +3816,7 @@ def extract_policy_scripts(policy_json: dict[str, Any], raw_xml: Any) -> list[di
 def list_vpp_macos_apps(profile_name: str | None) -> list[dict[str, Any]]:
     # Preferred modern endpoint path.
     cmd = ["jamf-cli", "pro", "vpp-locations", "content", "--all", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
 
     entries: list[dict[str, Any]] = []
@@ -3187,8 +3845,7 @@ def list_vpp_macos_apps(profile_name: str | None) -> list[dict[str, Any]]:
     # Fallback to classic assignments if no entries found.
     if not entries:
         cmd = ["jamf-cli", "pro", "classic-vpp-assignments", "list", "--output", "json"]
-        if profile_name:
-            cmd.extend(_auth_args(profile_name))
+        cmd.extend(_auth_args(profile_name))
         cdata = parse_json(run_cmd_maybe(cmd))
         if isinstance(cdata, list):
             entries.extend([x for x in cdata if isinstance(x, dict)])
@@ -3223,8 +3880,7 @@ def list_vpp_macos_apps(profile_name: str | None) -> list[dict[str, Any]]:
 def list_mac_apps(profile_name: str | None) -> list[dict[str, Any]]:
     """Return all managed macOS App Store / VPP apps via classic-mac-apps list."""
     cmd = ["jamf-cli", "pro", "classic-mac-apps", "list", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         return data
@@ -3235,8 +3891,7 @@ def list_mac_apps(profile_name: str | None) -> list[dict[str, Any]]:
 
 def get_mac_app_json(app_id: int, profile_name: str | None) -> dict[str, Any]:
     cmd = ["jamf-cli", "pro", "classic-mac-apps", "get", str(app_id), "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, dict):
         return data
@@ -3245,8 +3900,7 @@ def get_mac_app_json(app_id: int, profile_name: str | None) -> dict[str, Any]:
 
 def get_mac_app_raw_xml(app_id: int, profile_name: str | None) -> str:
     cmd = ["jamf-cli", "pro", "classic-mac-apps", "get", str(app_id), "--output", "raw"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     return run_cmd_maybe(cmd)
 
 
@@ -3254,8 +3908,7 @@ def get_mac_app_raw_xml(app_id: int, profile_name: str | None) -> str:
 
 def list_restricted_software(profile_name: str | None) -> list[dict[str, Any]]:
     cmd = ["jamf-cli", "pro", "classic-restricted-software", "list", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         return data
@@ -3267,8 +3920,7 @@ def list_restricted_software(profile_name: str | None) -> list[dict[str, Any]]:
 def get_restricted_software_json(rs_id: int, profile_name: str | None) -> dict[str, Any]:
     cmd = ["jamf-cli", "pro", "classic-restricted-software", "get",
            str(rs_id), "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, dict):
         return data
@@ -3299,8 +3951,7 @@ def list_mobile_devices(profile_name: str | None) -> list[dict[str, Any]]:
     relevant --section to fetch those when needed. Returns [] on failure.
     """
     cmd = ["jamf-cli", "pro", "mobile-devices", "list", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         return data
@@ -3314,8 +3965,7 @@ def list_mobile_devices(profile_name: str | None) -> list[dict[str, Any]]:
 def list_mobile_apps(profile_name: str | None) -> list[dict[str, Any]]:
     """Return all mobile-device apps (classic API)."""
     cmd = ["jamf-cli", "pro", "classic-mobile-apps", "list", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         return data
@@ -3329,8 +3979,7 @@ def list_mobile_apps(profile_name: str | None) -> list[dict[str, Any]]:
 def get_mobile_app_json(app_id: int, profile_name: str | None) -> dict[str, Any]:
     cmd = ["jamf-cli", "pro", "classic-mobile-apps", "get",
            str(app_id), "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, dict):
         return data
@@ -3341,8 +3990,7 @@ def list_mobile_config_profiles(profile_name: str | None) -> list[dict[str, Any]
     """Return all classic mobile-device configuration profiles."""
     cmd = ["jamf-cli", "pro", "classic-mobile-config-profiles", "list",
            "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         return data
@@ -3357,8 +4005,7 @@ def get_mobile_config_profile_json(prof_id: int,
                                    profile_name: str | None) -> dict[str, Any]:
     cmd = ["jamf-cli", "pro", "classic-mobile-config-profiles", "get",
            str(prof_id), "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, dict):
         return data
@@ -3373,8 +4020,7 @@ def list_mobile_device_groups(profile_name: str | None) -> list[dict[str, Any]]:
     computer-groups elsewhere in this script.
     """
     cmd = ["jamf-cli", "pro", "mobile-device-groups", "list", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         items = data
@@ -3496,8 +4142,7 @@ def extract_mobile_scope(scope_dict: dict | None) -> tuple[list[str], list[str],
 def fetch_account_groups(profile_name: str | None) -> list[dict[str, Any]]:
     """Return all Jamf Pro account groups with full member detail."""
     cmd = ["jamf-cli", "pro", "account-groups", "list", "--all", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         return data
@@ -3513,8 +4158,7 @@ def fetch_user_accounts(profile_name: str | None) -> list[dict[str, Any]]:
     NOT surface the local account names in any sheet — only counts.
     """
     cmd = ["jamf-cli", "pro", "user-accounts", "list", "--all", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         return data
@@ -3548,8 +4192,7 @@ def fetch_sso_failover(profile_name: str | None,
 
 def list_computer_prestages(profile_name: str | None) -> list[dict[str, Any]]:
     cmd = ["jamf-cli", "pro", "computer-prestages", "list", "--all", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         return data
@@ -3561,8 +4204,7 @@ def list_computer_prestages(profile_name: str | None) -> list[dict[str, Any]]:
 def get_computer_prestage_json(ps_id: str, profile_name: str | None) -> dict[str, Any]:
     cmd = ["jamf-cli", "pro", "computer-prestages", "get",
            str(ps_id), "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, dict):
         return data
@@ -3602,8 +4244,7 @@ def list_computers_inventory(
     cmd = ["jamf-cli", "pro", "computers-inventory", "list", "--all", "--output", "json"]
     for s in sections:
         cmd.extend(["--section", s])
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         return data
@@ -3627,8 +4268,7 @@ def list_filevault_inventory(profile_name: str | None) -> list[dict[str, Any]]:
     """
     cmd = ["jamf-cli", "pro", "computers-inventory", "filevault",
            "--all", "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         return data
@@ -3656,8 +4296,7 @@ def list_laps_accounts_for_device(
         return []
     cmd = ["jamf-cli", "pro", "local-admin-passwords", "accounts",
            "get", management_id, "--output", "json"]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         return data
@@ -3704,8 +4343,7 @@ def list_msu_plans(profile_name: str | None) -> list[dict[str, Any]]:
         "jamf-cli", "pro", "managed-software-updates-plans", "list",
         "--all", "--output", "json",
     ]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         return data
@@ -3728,8 +4366,7 @@ def report_update_status_failures(profile_name: str | None) -> list[dict[str, An
         "jamf-cli", "pro", "report", "update-status",
         "--scan-failures", "--output", "json",
     ]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         return data
@@ -3757,8 +4394,7 @@ def get_ddm_status_items(client_management_id: str,
         "jamf-cli", "pro", "ddm-statuss", "status-items",
         "--id", str(client_management_id), "--output", "json",
     ]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         return data
@@ -3791,8 +4427,7 @@ def list_mdm_command_failures_for_device(
         "--sort", "dateSent:desc",
         "--output", "json",
     ]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, list):
         return data
@@ -4020,8 +4655,7 @@ def get_profile_json(profile_id: int, profile_name: str | None) -> dict[str, Any
         "--output",
         "json",
     ]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, dict):
         return data
@@ -4038,8 +4672,7 @@ def get_profile_raw_xml(profile_id: int, profile_name: str | None) -> str:
         "--output",
         "raw",
     ]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     return run_cmd_maybe(cmd)
 
 
@@ -4062,8 +4695,7 @@ def get_profile_scope_json(profile_id: int, profile_name: str | None) -> dict[st
         "jamf-cli", "pro", "classic-macos-config-profiles", "get",
         str(profile_id), "--output", "json",
     ]
-    if profile_name:
-        cmd.extend(_auth_args(profile_name))
+    cmd.extend(_auth_args(profile_name))
     data = parse_json(run_cmd_maybe(cmd))
     if isinstance(data, dict):
         scope = data.get("scope")
@@ -4555,10 +5187,7 @@ def _resolve_instances(preselected: str | None) -> list[str | None]:
 # but silently dropped if empty.
 # ─────────────────────────────────────────────────────────────────────────────
 SHEET_MENU: list[tuple[str, str]] = [
-    # Note: "Jamf MSP Summary" is intentionally NOT in this menu. It is
-    # always included as the first sheet of every workbook and cannot be
-    # deselected (per user policy).
-    #
+    ("msp-summary",              "Jamf MSP Summary"),
     # Note: "macOS - LAPS Accounts" has been dropped. Querying LAPS
     # passwords triggers a rotation, which we explicitly never want.
     # LAPS status still appears in the Jamf MSP Summary when enabled.
@@ -4696,6 +5325,13 @@ def main() -> int:
               "'all' or omitted = every sheet. "
               f"Available slugs: {', '.join(s for s, _ in SHEET_MENU)}"),
     )
+    parser.add_argument(
+        "--refresh-capabilities",
+        dest="refresh_capabilities",
+        action="store_true",
+        default=False,
+        help="Force a fresh fetch of SOFA device capability feeds, ignoring the 7-day cache.",
+    )
     # MJT bridge: shell wrapper supplies these instead of --profile
     parser.add_argument("--url", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--token-file", dest="token_file", default=None, help=argparse.SUPPRESS)
@@ -4765,12 +5401,6 @@ def main() -> int:
     else:
         # Terminal mode picks its own dataset; sheet selection is irrelevant.
         selected_sheets = set(_all_sheet_names)
-
-    # The Jamf MSP Summary is always included as the first sheet — it isn't
-    # offered in the picker, so we force-add it here regardless of what the
-    # user selected. (No-op when picked via "all".)
-    if fmt in (FMT_XLSX, FMT_CSV):
-        selected_sheets.add("Jamf MSP Summary")
 
     # Health Check Key sheets ride along with their Health Check sheet. They
     # aren't offered as standalone picks — selecting a Health Check sheet
@@ -4879,10 +5509,18 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
         """
         cmd = ["jamf-cli", "pro", noun, "list",
                "--page-size", "1", "--output", "json"]
-        if profile_name:
-            cmd.extend(_auth_args(profile_name))
+        cmd.extend(_auth_args(profile_name))
         try:
-            data = parse_json(run_cmd_maybe(cmd))
+            proc = subprocess.run(
+                _with_quiet_flags(cmd), capture_output=True, text=True, timeout=30
+            )
+            data = parse_json(proc.stdout if proc.returncode == 0 else "")
+        except subprocess.TimeoutExpired:
+            print(
+                f"  ⚠ Fleet probe timed out for {noun} — assuming devices present",
+                file=sys.stderr,
+            )
+            return 1
         except Exception:
             return 0
         if isinstance(data, list):
@@ -4897,13 +5535,27 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
                     return 1 if v > 0 else 0
         return 0
 
-    # Presence probes only — these return 0 or 1, not the real fleet size.
-    # Real counts go to the Jamf MSP Summary via the overview fetch below.
-    _have_macos_fleet = _probe_count("computers", args.profile) > 0
-    _have_ios_fleet   = _probe_count("mobile-devices", args.profile) > 0
+    # Presence probes — only run the side(s) needed by the selected sheets.
+    # MSP Summary needs both (it shows fleet counts for both platforms).
+    # macOS - * sheets need the macOS probe; iOS - * sheets need the iOS probe.
+    _need_summary = "Jamf MSP Summary" in selected_sheets
+    _want_macos_probe = _need_summary or any(
+        s.startswith("macOS") for s in selected_sheets
+    )
+    _want_ios_probe = _need_summary or any(
+        s.startswith("iOS") for s in selected_sheets
+    )
+    _have_macos_fleet = _probe_count("computers", args.profile) > 0 if _want_macos_probe else False
+    _have_ios_fleet   = _probe_count("mobile-devices", args.profile) > 0 if _want_ios_probe else False
+
+    def _probe_label(probed: bool, present: bool) -> str:
+        if not probed:
+            return "skipped"
+        return "yes" if present else "no"
+
     _section_done(
-        f"Fleet probe: macOS={'yes' if _have_macos_fleet else 'no'}, "
-        f"iOS={'yes' if _have_ios_fleet else 'no'}",
+        f"Fleet probe: macOS={_probe_label(_want_macos_probe, _have_macos_fleet)}, "
+        f"iOS={_probe_label(_want_ios_probe, _have_ios_fleet)}",
         1,
     )
 
@@ -5279,6 +5931,15 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
     if _use_ollama:
         print("  ✦ Ollama ready — AI descriptions enabled",
               file=sys.stderr, flush=True)
+
+    # ── Device capability index ───────────────────────────────────────────────
+    # Initialise once per process run; subsequent _export_one calls reuse it.
+    global _capability_index
+    if _capability_index is None:
+        _capability_index = DeviceCapabilityIndex(
+            force_refresh=getattr(args, "refresh_capabilities", False)
+        )
+        _capability_index._ensure_loaded()
 
     # ── Jamf Auto Update catalog ──────────────────────────────────────────────
     # The catalog feeds the Version column on macOS - Apps - Scope (matches
@@ -6034,6 +6695,7 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
         computers = []
     _section_done("Computers found", len(computers))
     health_rows: list[list] = []
+    macos_health_hyperlinks: dict[tuple[int, int], str] = {}
     # Serial numbers that landed in health_rows — used by the Managed Macs
     # sheet to flag "In Health Check" without duplicating the issue logic.
     _health_serials: set[str] = set()
@@ -6081,10 +6743,11 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
         storage   = comp.get("storage") or {}
         security  = comp.get("security") or {}
 
-        comp_name    = str(general.get("name") or "")
-        serial       = str(hardware.get("serialNumber") or "")
-        model        = str(hardware.get("model") or "")
-        os_version   = str(os_info.get("version") or "")
+        comp_name        = str(general.get("name") or "")
+        serial           = str(hardware.get("serialNumber") or "")
+        model            = str(hardware.get("model") or "")
+        model_identifier = str(hardware.get("modelIdentifier") or "")
+        os_version       = str(os_info.get("version") or "")
 
         # Helper: find first non-empty value from a named EA across general + hardware
         def _ea_val(name: str) -> str:
@@ -6147,23 +6810,23 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
         _os_major = _macos_major(os_version)
         _macos_names = {
             11: "Big Sur", 12: "Monterey", 13: "Ventura",
-            14: "Sonoma", 15: "Sequoia", 26: "Tahoe",
+            14: "Sonoma", 15: "Sequoia", 26: "Tahoe", 27: "Golden Gate",
         }
-        # datajar N-2 support policy (as of Jun 2026):
-        # Recommended:      26.x (Tahoe), 15.x (Sequoia)
-        # Minimum Support:  14.x (Sonoma) - flagged for proactive planning
-        # Untested:         13.x and earlier
-        if _os_major in (26, 15):
+        # datajar N-2 support policy (as of Oct 2026):
+        # Recommended:      27.x (Golden Gate), 26.x (Tahoe)
+        # Minimum Support:  15.x (Sequoia) - flagged for proactive planning
+        # Untested:         14.x and earlier
+        if _os_major in (27, 26):
             os_support_tier = None      # Recommended - no flag
             os_action_hint  = None
-        elif _os_major == 14:
-            os_support_tier = f"Minimum support - macOS {os_version} (Sonoma)"
-            os_action_hint  = "Plan upgrade to macOS 15 or 26 before October 2026"
+        elif _os_major == 15:
+            os_support_tier = f"Minimum support - macOS {os_version} (Sequoia)"
+            os_action_hint  = "Plan upgrade to macOS 26 or 27"
         elif _os_major > 0:
             _mn = _macos_names.get(_os_major, "")
             _mn_str = f" ({_mn})" if _mn else ""
             os_support_tier = f"Unsupported - macOS {os_version}{_mn_str}"
-            os_action_hint  = "Schedule OS upgrade to macOS 15 or 26"
+            os_action_hint  = "Schedule OS upgrade to macOS 26 or 27"
         else:
             os_support_tier = None
             os_action_hint  = None
@@ -6406,6 +7069,25 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
         issues_str  = ";\n".join(i for i, _ in issues_and_actions)
         actions_str = ";\n".join(a for _, a in issues_and_actions if a)
 
+        _sec_rec = "Up to date"
+        _sec_url = ""
+        _sr = {}
+        if _capability_index:
+            _sr = _capability_index.security_recommendation("macOS", os_version)
+            _sec_rec = _sr.get("text") or "Up to date"
+            _sec_url = _sr.get("url", "")
+
+        # Enhance static actions with Ollama when available, injecting
+        # hardware capability facts so the model knows the device's max OS.
+        if _use_ollama and _capability_index and model_identifier:
+            _cap = _capability_index.get(model_identifier, os_version, model_name=model)
+            enhanced = _ollama_health_actions(
+                comp_name, model, os_version, issues_str, actions_str,
+                _cap, _sr if not _sr.get("up_to_date", True) else None,
+            )
+            if enhanced:
+                actions_str = enhanced
+
         health_rows.append([
             comp_name,
             serial,
@@ -6413,7 +7095,10 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
             os_version,
             issues_str,
             actions_str,
+            _sec_rec,
         ])
+        if _sec_url and _sec_rec:
+            macos_health_hyperlinks[(len(health_rows) - 1, 6)] = _sec_url
         _health_serials.add(serial.strip().lower())
 
     # ── Fleet stats for the Jamf MSP Summary ──────────────────────────────────
@@ -6788,18 +7473,19 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
     # Health Check suggested actions are pre-written static text — no AI.
 
     # ── Jamf MSP Summary ──────────────────────────────────────────────────────
+    # overview is always fetched — _ui_base deep-links are built from it for
+    # all sheets, regardless of whether the MSP Summary sheet is selected.
     _section_start("Fetching instance summary")
-    # Overview drives the rest of the summary (ADE/VPP tokens, certificates,
-    # check-in frequency, etc.) — fetched here, not as part of the fleet probe.
     _overview     = fetch_instance_overview(args.profile)
-    _jp_version   = fetch_jamf_pro_version(args.profile)
+    # The remaining calls are only needed when the MSP Summary sheet is selected.
+    _jp_version   = fetch_jamf_pro_version(args.profile)   if _need_summary else ""
     # LAPS: only pull settings; we no longer query per-device passwords.
     # If the settings call comes back with auto-deploy disabled, we skip
     # the LAPS summary rows entirely so the report doesn't carry rows for
     # a feature the tenant isn't using.
-    _laps         = fetch_laps_settings(args.profile)
-    _sso          = fetch_sso_settings(args.profile)
-    _cloud_ldaps  = fetch_cloud_ldap_servers(args.profile)
+    _laps         = fetch_laps_settings(args.profile)      if _need_summary else {}
+    _sso          = fetch_sso_settings(args.profile)       if _need_summary else {}
+    _cloud_ldaps  = fetch_cloud_ldap_servers(args.profile) if _need_summary else []
     # Jamf Connect Deployments row removed — `fetch_jamf_connect_deployments`
     # counted Jamf Pro-side config-profile entries, NOT the Jamf Connect Login
     # agents actually installed on Macs. Without a reliable per-Mac install
@@ -6807,10 +7493,10 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
     # summary. If you ever want to add it back, build the count from the
     # macOS - Managed Macs inventory by looking for the Jamf Connect Login
     # bundle id in installed applications.
-    _active_alerts = fetch_active_alerts(args.profile)
-    _protect      = fetch_jamf_protect_status(args.profile)
-    _failover_url = fetch_sso_failover(args.profile, _sso)
-    _user_accts   = fetch_user_accounts(args.profile)
+    _active_alerts = fetch_active_alerts(args.profile)        if _need_summary else []
+    _protect      = fetch_jamf_protect_status(args.profile)   if _need_summary else {}
+    _failover_url = fetch_sso_failover(args.profile, _sso)    if _need_summary else "-"
+    _user_accts   = fetch_user_accounts(args.profile)         if _need_summary else {}
 
     def _ov(key: str) -> str:
         return _overview.get(key, "-")
@@ -7402,8 +8088,10 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
         "headers": [
             "Computer Name", "Serial Number", "Model",
             "macOS Version", "Issues", "Suggested Actions",
+            "Security Recommendation",
         ],
         "rows": health_rows,
+        "hyperlinks": macos_health_hyperlinks,
         # Same tab colour as the Key sheet + hover tooltips on each flagged
         # issue (pulls "why it matters" from the macOS definitions).
         "tab_color": _TAB_HC_MACOS,
@@ -8467,7 +9155,7 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
         #
         # Thresholds (tune in code):
         #   STALE_DAYS              = 30   — stale inventory
-        #   IOS_MIN_MAJOR           = 18   — iOS 17.x and older = unsupported
+        #   IOS_MIN_MAJOR           = 18   — iOS 18.x = minimum support; 17.x and older = unsupported
         #   STORAGE_MIN_MB_UPDATE   = 6000 — iOS major updates need ~6 GB free
         #   STORAGE_MIN_PCT         = 10   — overall low-storage warning
         #   MDM_EXPIRY_WARN_DAYS    = 90   — MDM cert about to expire
@@ -8521,7 +9209,7 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
             # Unmanaged
             if general.get("managed") is False:
                 issues.append("Unmanaged (MDM channel inactive)")
-                actions.append("Re-enrol via Apple Configurator or DEP/ADE.")
+                actions.append("Re-enrol via ADE.")
 
             # Unsupervised (only meaningful for institutional ownership)
             ownership = str(general.get("deviceOwnershipType") or "").lower()
@@ -8534,34 +9222,44 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
                     "require supervision."
                 )
 
-            # iOS version — tiered support policy (no CLI-send-updates advice;
-            # we only plan, never push OS updates from this report).
-            # Tiers (as of Jun 2026, shifts when iOS 27 ships):
-            #   Recommended:     iOS 26.x, iOS 18.x        → no flag
-            #   Minimum support: iOS 17.x                  → plan upgrade
-            #   Unsupported:     iOS 16.x and earlier      → schedule upgrade
+            # iOS version — tiered support policy.
+            # Tiers (as of Oct 2026):
+            #   Recommended:     iOS/iPadOS 27.x, 26.x     → no flag
+            #   Minimum support: iOS 18.x (not iPadOS)     → upgrade
+            #   Unsupported:     iOS 17.x and earlier      → schedule upgrade
             dev_type = str(dev.get("deviceType") or "").lower()
+            _model_id = str(hardware.get("modelIdentifier") or "")
+            _model_name = str(hardware.get("model") or "")
+            _ios_cap = (
+                _capability_index.get(_model_id, "", model_name=_model_name)
+                if _capability_index else {}
+            )
+            _ios_max_major = _ios_cap.get("maxOsMajor")
+            _is_ipad = dev_type in ("ipados", "ipad") or _model_id.startswith("iPad") or "ipad" in _model_name.lower()
+            _plat_label = "iPadOS" if _is_ipad else "iOS"
             if dev_type in ("ios", "ipados", "ipad", "iphone"):
                 os_ver = str(general.get("osVersion") or "")
                 _major_match = re.match(r"^(\d+)", os_ver)
                 if _major_match:
                     _major = int(_major_match.group(1))
-                    if _major in (18, 26):
+                    if _major in (27, 26):
                         pass  # Recommended — no flag
-                    elif _major == 17:
+                    elif _major == 18 and not _is_ipad:
+                        issues.append("Minimum support (iOS 18.x)")
+                        if _ios_max_major and _ios_max_major >= 26:
+                            actions.append(f"Upgrade to {_plat_label} {_ios_max_major}.")
+                        else:
+                            actions.append(f"Upgrade to {_plat_label} 26 or 27.")
+                    elif _major > 0 and _major < 18:
                         issues.append(
-                            f"Minimum support - iOS {os_ver}"
+                            f"Unsupported ({_plat_label} {_major}.x)"
                         )
-                        actions.append(
-                            "Plan upgrade to iOS 18 or 26 before iOS 27 ships."
-                        )
-                    elif _major > 0 and _major < 17:
-                        issues.append(
-                            f"Unsupported - iOS {os_ver}"
-                        )
-                        actions.append(
-                            "Schedule OS upgrade to iOS 18 or 26."
-                        )
+                        if _ios_max_major and _ios_max_major >= 26:
+                            actions.append(f"Upgrade to {_plat_label} {_ios_max_major}.")
+                        elif _ios_max_major and _ios_max_major < 26:
+                            actions.append(f"Device max OS is {_plat_label} {_ios_max_major} — consider replacement.")
+                        else:
+                            actions.append(f"Upgrade to {_plat_label} 26 or 27.")
 
             # Storage for OS updates. Display convention across all storage
             # values: GB by default with up to 2 decimal places; switch to MB
@@ -8640,13 +9338,30 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
                 continue
 
             # Build the row.
-            dev_id = dev.get("mobileDeviceId") or general.get("id") or ""
-            name = str(general.get("displayName") or "")
-            serial = str(hardware.get("serialNumber") or "")
-            model = str(hardware.get("model") or "")
-            os_ver = str(general.get("osVersion") or "")
+            dev_id           = dev.get("mobileDeviceId") or general.get("id") or ""
+            name             = str(general.get("displayName") or "")
+            serial           = str(hardware.get("serialNumber") or "")
+            model            = str(hardware.get("model") or "")
+            model_identifier = str(hardware.get("modelIdentifier") or "")
+            os_ver           = str(general.get("osVersion") or "")
             last_inv_str = (last_inv.astimezone().strftime("%Y-%m-%d")
                             if last_inv else "-")
+
+            # Days since last contact
+            _days_since_contact = ""
+            if last_inv:
+                _dsc = (_now_utc - last_inv).days
+                _days_since_contact = str(_dsc)
+            else:
+                _days_since_contact = "-"
+
+            # Max OS from capability index
+            _max_os_str = "-"
+            if _ios_cap and _ios_cap.get("maxOsName"):
+                _max_os_str = str(_ios_cap["maxOsName"])
+            elif _ios_cap and _ios_cap.get("maxOsMajor"):
+                _max_os_str = str(_ios_cap["maxOsMajor"])
+
             # Storage Free column: integer GB when ≥ 1 GB; sub-1 GB shows MB
             # with explicit unit. Header for this column carries "(GB)".
             if isinstance(avail, (int, float)):
@@ -8657,16 +9372,27 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
             else:
                 avail_str = "-"
 
+            _ios_sec_rec = "Up to date"
+            _ios_sec_url = ""
+            if _capability_index:
+                _ios_sr = _capability_index.security_recommendation(_plat_label, os_ver)
+                _ios_sec_rec = _ios_sr.get("text") or "Up to date"
+                _ios_sec_url = _ios_sr.get("url", "")
+
             ios_health_rows.append([
                 name or "-", serial or "-", model or "-",
-                os_ver or "-", last_inv_str, avail_str,
+                os_ver or "-", _max_os_str,
+                _days_since_contact, avail_str,
                 "\n".join(issues), "\n".join(actions),
+                _ios_sec_rec,
             ])
             if serial:
                 _ios_health_serials.add(serial.lower())
             _u = _url_ios_device(dev_id)
             if _u:
                 ios_health_hyperlinks[(len(ios_health_rows) - 1, 0)] = _u
+            if _ios_sec_url and _ios_sec_rec:
+                ios_health_hyperlinks[(len(ios_health_rows) - 1, 9)] = _ios_sec_url
 
         # iOS Health Check Key — the iOS counterpart to the macOS Health
         # Check Key. Static reference content explaining each iOS flag. Built
@@ -8688,8 +9414,10 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
         all_sheets["iOS - Health Check"] = {
             "title": "iOS  |  Health Check",
             "headers": [
-                "Device Name", "Serial", "Model", "iOS Version",
-                "Last Inventory", "Storage Free (GB)", "Issues", "Suggested Actions",
+                "Device Name", "Serial", "Model", "iOS Version", "Max OS",
+                "Days Since Contact", "Storage Free (GB)",
+                "Issues", "Suggested Actions",
+                "Security Recommendation",
             ],
             "rows": ios_health_rows,
             "hyperlinks": ios_health_hyperlinks,
