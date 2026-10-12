@@ -9826,10 +9826,32 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
         for _orphan_sheet in ("macOS - Orphaned Items", "iOS - Orphaned Items"):
             if _orphan_sheet in all_sheets:
                 _decorate_orphans_sheet(wb, _orphan_sheet, all_sheets[_orphan_sheet])
-        # Password is the jamf-cli profile name the script is already working
-        # with (raw, unsanitised — same string the user typed/picked).
-        xlsx_password = raw_profile
-        save_encrypted(wb, str(xlsx_path), xlsx_password)
+        _ui_section("Workbook Protection")
+        print()
+        _ui_menu_line(1, "Save without password")
+        _ui_menu_line(2, "Password-protect the workbook")
+        print()
+        _ui_hbar()
+        try:
+            _pw_choice = input("   Choose by number [1]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            _pw_choice = "1"
+        _use_password = _pw_choice == "2"
+
+        if _use_password:
+            try:
+                _custom_pw = input("   Enter password (leave blank for profile name): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                _custom_pw = ""
+            xlsx_password = _custom_pw or raw_profile
+            save_encrypted(wb, str(xlsx_path), xlsx_password)
+        else:
+            plain = io.BytesIO()
+            wb.save(plain)
+            patched = _inject_ignored_errors(plain.getvalue())
+            with open(str(xlsx_path), "wb") as fh:
+                fh.write(patched)
+
         print(f"Profiles processed:    {len(selected)}")
         print(f"Workbook:              {xlsx_path}")
         # Ollama cache stats — only meaningful when AI was actually used.
@@ -9843,9 +9865,10 @@ def _export_one(args, fmt, selected_sheets, terminal_dataset) -> int:
                   f"db: {_OLLAMA_CACHE_PATH})")
         for name, spec in all_sheets.items():
             print(f"  Sheet: {name:<30} ({len(spec['rows'])} rows)")
-        print()
-        print("This file is password protected.")
-        print(f"Password to open: {xlsx_password}")
+        if _use_password:
+            print()
+            print("This file is password protected.")
+            print(f"Password to open: {xlsx_password}")
         # Reveal the encrypted workbook in Finder (highlights the file in
         # its enclosing folder). Best-effort — don't fail the run if `open`
         # is missing (e.g. non-macOS environments).
